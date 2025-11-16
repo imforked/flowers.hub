@@ -1,3 +1,5 @@
 messages/unheard/*
 messages/heard/*
 .env
+__pycache__/
+*.pyc
