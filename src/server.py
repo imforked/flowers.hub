@@ -17,6 +17,12 @@ ensure_dirs(STORAGE_ROOT)
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
+@app.route("/test", methods=["GET"])
+def test_route():
+    app.logger.info('"/test" was hit')
+    return jsonify({"message": '"/test" was hit'}), 200
+
+
 @app.route("/new-message", methods=["POST"])
 def new_message():
     data = request.get_json(force=True)
