@@ -11,6 +11,7 @@ STEPS = 200
 
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(PWM_PIN, GPIO.OUT)
+GPIO.cleanup()
 
 pwm = GPIO.PWM(PWM_PIN, PWM_FREQUENCY)
 pwm.start(MIN_DUTY)
