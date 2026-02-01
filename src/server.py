@@ -19,6 +19,7 @@ ensure_dirs(STORAGE_ROOT)
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
+
 @app.route("/test", methods=["GET"])
 def test_route():
     app.logger.info('"/test" was hit')
@@ -52,7 +53,9 @@ def new_message():
     app.logger.info("Saved message %s -> %s", message_id, wav_path)
     return jsonify({"status": "saved", "id": message_id}), 201
 
-    def start_breathing():
+
+
+def start_breathing():
     t = threading.Thread(
         target=breathing_fade,
         daemon=True,  # dies when Flask stops
