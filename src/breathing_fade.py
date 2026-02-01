@@ -2,6 +2,8 @@ import RPi.GPIO as GPIO
 import time
 import math
 
+GPIO.cleanup()
+
 PWM_PIN = 18
 PWM_FREQUENCY = 500
 MIN_DUTY = 50
@@ -11,7 +13,6 @@ STEPS = 200
 
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(PWM_PIN, GPIO.OUT)
-GPIO.cleanup()
 
 pwm = GPIO.PWM(PWM_PIN, PWM_FREQUENCY)
 pwm.start(MIN_DUTY)
