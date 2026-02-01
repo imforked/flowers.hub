@@ -4,6 +4,8 @@ import logging
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from utils import save_unheard_message, ensure_dirs
+import threading
+from breathing_fade import breathing_fade
 
 # Load environment variables
 load_dotenv()
@@ -50,6 +52,14 @@ def new_message():
     app.logger.info("Saved message %s -> %s", message_id, wav_path)
     return jsonify({"status": "saved", "id": message_id}), 201
 
+    def start_breathing():
+    t = threading.Thread(
+        target=breathing_fade,
+        daemon=True,  # dies when Flask stops
+    )
+    t.start()
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT, debug=True)
+    start_breathing()
+    app.run(host="0.0.0.0", port=PORT, debug=False)
