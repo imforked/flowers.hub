@@ -3,12 +3,12 @@ import base64
 import logging
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
-from utils import save_unheard_message, ensure_dirs
+from utils import save_unheard_message, ensure_dirs, play_wav_file
 
 # Load environment variables
 load_dotenv()
 
-STORAGE_ROOT = os.getenv("STORAGE_DIR", "../messages")
+STORAGE_ROOT = os.getenv("STORAGE_DIR", os.path.expanduser("~/messages"))
 PORT = int(os.getenv("PI_PORT", "5000"))
 
 # Ensure folders exist
@@ -49,6 +49,31 @@ def new_message():
 
     app.logger.info("Saved message %s -> %s", message_id, wav_path)
     return jsonify({"status": "saved", "id": message_id}), 201
+
+@app.route("/play-latest", methods=["POST"])
+def play_latest():
+    unheard_dir = os.path.join(STORAGE_ROOT, "unheard")
+    
+    app.logger.info("Looking for WAVs in: %s", unheard_dir)
+
+    wav_files = [
+        f for f in os.listdir(unheard_dir)
+        if f.endswith(".wav")
+    ]
+
+    if not wav_files:
+        return jsonify({"error": "no unheard messages"}), 404
+
+    wav_files.sort(reverse=True)
+    latest_wav = wav_files[0]
+
+    wav_path = os.path.join(unheard_dir, latest_wav)
+
+    app.logger.info("Playing %s", wav_path)
+
+    play_wav_file(wav_path)
+
+    return jsonify({"status": "played", "file": latest_wav}), 200
 
 
 if __name__ == "__main__":

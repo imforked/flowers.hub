@@ -1,5 +1,6 @@
 import os
 import json
+import subprocess
 
 def ensure_dirs(storage_root: str):
     """
@@ -34,3 +35,16 @@ def save_unheard_message(storage_root: str, message_id: str, created_at: str, au
         json.dump(meta, f)
 
     return wav_path
+
+def play_wav_file(wav_path: str):
+    """
+    Plays a WAV file using aplay.
+    Blocks until playback is finished.
+    """
+    try:
+        subprocess.run(
+            ["aplay", wav_path],
+            check=True
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Playback failed: {e}")
