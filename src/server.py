@@ -3,6 +3,7 @@ import base64
 import logging
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+import shutil
 from utils import save_unheard_message, ensure_dirs, play_wav_file
 
 # Load environment variables
@@ -53,6 +54,9 @@ def new_message():
 @app.route("/play-latest", methods=["POST"])
 def play_latest():
     unheard_dir = os.path.join(STORAGE_ROOT, "unheard")
+    heard_dir = os.path.join(STORAGE_ROOT, "heard")
+
+    os.makedirs(heard_dir, exist_ok=True)
 
     app.logger.info("Looking for WAVs in: %s", unheard_dir)
 
@@ -69,10 +73,16 @@ def play_latest():
 
     latest_wav_path = wav_files[0]
     latest_wav_name = os.path.basename(latest_wav_path)
+    latest_json_path = os.path.join(unheard_dir, latest_wav_name.replace(".wav", ".json"))
 
     app.logger.info("Playing %s", latest_wav_path)
 
     play_wav_file(latest_wav_path)
+
+    # Move the WAV and JSON to heard folder after playback
+    shutil.move(latest_wav_path, os.path.join(heard_dir, latest_wav_name))
+    if os.path.exists(latest_json_path):
+        shutil.move(latest_json_path, os.path.join(heard_dir, os.path.basename(latest_json_path)))
 
     return jsonify({"status": "played", "file": latest_wav_name}), 200
 
