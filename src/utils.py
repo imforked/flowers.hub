@@ -1,7 +1,6 @@
 import os
 import json
-from pydub import AudioSegment
-import simpleaudio as sa
+import subprocess
 
 def ensure_dirs(storage_root: str):
     """
@@ -38,11 +37,5 @@ def save_unheard_message(storage_root: str, message_id: str, created_at: str, au
     return wav_path
 
 def play_wav_file(file_path: str):
-    audio = AudioSegment.from_file(file_path)
-    play_obj = sa.play_buffer(
-        audio.raw_data,
-        num_channels=audio.channels,
-        bytes_per_sample=audio.sample_width,
-        sample_rate=audio.frame_rate
-    )
-    play_obj.wait_done()
+    # -nodisp hides video, -autoexit exits when done, -loglevel quiet silences FFmpeg messages
+    subprocess.run(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", file_path])
