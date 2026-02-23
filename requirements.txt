@@ -2,3 +2,5 @@ requests
 pygame
 flask
 python-dotenv
+pydub
+simpleaudio
