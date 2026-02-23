@@ -1,6 +1,7 @@
 import os
 import json
-import subprocess
+from pydub import AudioSegment
+import simpleaudio as sa
 
 def ensure_dirs(storage_root: str):
     """
@@ -36,15 +37,12 @@ def save_unheard_message(storage_root: str, message_id: str, created_at: str, au
 
     return wav_path
 
-def play_wav_file(wav_path: str):
-    """
-    Plays a WAV file using aplay.
-    Blocks until playback is finished.
-    """
-    try:
-        subprocess.run(
-            ["aplay", wav_path],
-            check=True
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"Playback failed: {e}")
+def play_wav_file(file_path: str):
+    audio = AudioSegment.from_file(file_path)
+    play_obj = sa.play_buffer(
+        audio.raw_data,
+        num_channels=audio.channels,
+        bytes_per_sample=audio.sample_width,
+        sample_rate=audio.frame_rate
+    )
+    play_obj.wait_done()
