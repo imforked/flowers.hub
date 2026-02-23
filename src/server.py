@@ -53,27 +53,28 @@ def new_message():
 @app.route("/play-latest", methods=["POST"])
 def play_latest():
     unheard_dir = os.path.join(STORAGE_ROOT, "unheard")
-    
+
     app.logger.info("Looking for WAVs in: %s", unheard_dir)
 
     wav_files = [
-        f for f in os.listdir(unheard_dir)
+        os.path.join(unheard_dir, f)
+        for f in os.listdir(unheard_dir)
         if f.endswith(".wav")
     ]
 
     if not wav_files:
         return jsonify({"error": "no unheard messages"}), 404
 
-    wav_files.sort(reverse=True)
-    latest_wav = wav_files[0]
+    wav_files.sort(key=os.path.getmtime, reverse=True)
 
-    wav_path = os.path.join(unheard_dir, latest_wav)
+    latest_wav_path = wav_files[0]
+    latest_wav_name = os.path.basename(latest_wav_path)
 
-    app.logger.info("Playing %s", wav_path)
+    app.logger.info("Playing %s", latest_wav_path)
 
-    play_wav_file(wav_path)
+    play_wav_file(latest_wav_path)
 
-    return jsonify({"status": "played", "file": latest_wav}), 200
+    return jsonify({"status": "played", "file": latest_wav_name}), 200
 
 
 if __name__ == "__main__":
