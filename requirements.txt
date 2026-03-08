@@ -3,4 +3,4 @@ pygame
 flask
 python-dotenv
 pvporcupine
-pyaudio
+sounddevice
