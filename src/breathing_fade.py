@@ -7,8 +7,8 @@ GPIO.cleanup()
 PWM_PINS = [18, 23, 24]
 PWM_FREQUENCY = 2000
 
-MIN_DUTY = 0
-MAX_DUTY = 25
+MIN_DUTY = 4
+MAX_DUTY = 100
 PERIOD = 4.0
 STEPS = 200
 GAMMA = 2.2   # human brightness perception correction
