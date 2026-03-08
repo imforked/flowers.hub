@@ -7,10 +7,11 @@ GPIO.cleanup()
 PWM_PINS = [18, 23, 24]
 PWM_FREQUENCY = 500
 
-MIN_DUTY = 0      # almost fully off
+MIN_DUTY = 0
 MAX_DUTY = 100
 PERIOD = 4.0
 STEPS = 200
+GAMMA = 2.2   # human brightness perception correction
 
 GPIO.setmode(GPIO.BCM)
 
@@ -23,10 +24,15 @@ for pin in PWM_PINS:
     pwms.append(pwm)
 
 
-def breathing_fade(min_duty=MIN_DUTY, max_duty=MAX_DUTY, period=PERIOD, steps=STEPS):
+def apply_gamma(value):
+    """
+    value: 0.0 - 1.0 brightness
+    returns gamma-corrected brightness
+    """
+    return pow(value, GAMMA)
 
-    amplitude = (max_duty - min_duty) / 2
-    offset = min_duty + amplitude
+
+def breathing_fade():
 
     phase_offsets = [
         0,
@@ -36,21 +42,25 @@ def breathing_fade(min_duty=MIN_DUTY, max_duty=MAX_DUTY, period=PERIOD, steps=ST
 
     try:
         while True:
-            for i in range(steps):
+            for i in range(STEPS):
 
-                base_angle = 2 * math.pi * i / steps
+                base_angle = 2 * math.pi * i / STEPS
 
                 for pwm, phase in zip(pwms, phase_offsets):
 
                     angle = base_angle + phase
-                    duty = offset + amplitude * math.sin(angle)
 
-                    # clamp to valid PWM range
-                    duty = max(0, min(100, duty))
+                    # sine wave normalized to 0-1
+                    brightness = (math.sin(angle) + 1) / 2
+
+                    # apply gamma correction
+                    brightness = apply_gamma(brightness)
+
+                    duty = MIN_DUTY + brightness * (MAX_DUTY - MIN_DUTY)
 
                     pwm.ChangeDutyCycle(duty)
 
-                time.sleep(period / steps)
+                time.sleep(PERIOD / STEPS)
 
     except KeyboardInterrupt:
         pass
