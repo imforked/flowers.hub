@@ -2,4 +2,3 @@ requests
 pygame
 flask
 python-dotenv
-vosk
