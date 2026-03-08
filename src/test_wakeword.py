@@ -1,8 +1,17 @@
+from dotenv import load_dotenv
+import os
 import pvporcupine
 import pyaudio
 import struct
 
-porcupine = pvporcupine.create(keywords=["picovoice"])  # built‑in keyword
+# Load environment variables from .env
+load_dotenv()
+access_key = os.environ.get("PICOVOICE_KEY")
+
+porcupine = pvporcupine.create(
+    access_key=access_key,
+    keywords=["picovoice"]
+)
 
 pa = pyaudio.PyAudio()
 stream = pa.open(
@@ -14,7 +23,6 @@ stream = pa.open(
 )
 
 print("Listening... say the wake word!")
-
 try:
     while True:
         pcm = stream.read(porcupine.frame_length, exception_on_overflow=False)
