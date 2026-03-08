@@ -1,37 +1,34 @@
 from dotenv import load_dotenv
 import os
 import pvporcupine
-import pyaudio
+import sounddevice as sd
 import struct
+import time
 
 # Load environment variables from .env
 load_dotenv()
 access_key = os.environ.get("PICOVOICE_KEY")
 
+# Create Porcupine instance
 porcupine = pvporcupine.create(
     access_key=access_key,
     keywords=["picovoice"]
 )
 
-pa = pyaudio.PyAudio()
-stream = pa.open(
-    rate=porcupine.sample_rate,
-    channels=1,
-    format=pyaudio.paInt16,
-    input=True,
-    input_device_index=1,
-    frames_per_buffer=porcupine.frame_length
-)
+def callback(indata, frames, time_info, status):
+    # Convert input to int16
+    pcm = struct.unpack_from("h" * porcupine.frame_length, indata)
+    if porcupine.process(pcm) >= 0:
+        print("Wake word detected!")
 
 print("Listening... say the wake word!")
-try:
+
+# Open audio stream at Porcupine's required sample rate
+with sd.InputStream(
+    samplerate=porcupine.sample_rate,
+    channels=1,
+    dtype='int16',
+    callback=callback
+):
     while True:
-        pcm = stream.read(porcupine.frame_length, exception_on_overflow=False)
-        pcm = struct.unpack_from("h" * porcupine.frame_length, pcm)
-        if porcupine.process(pcm) >= 0:
-            print("Wake word detected!")
-finally:
-    stream.stop_stream()
-    stream.close()
-    porcupine.delete()
-    pa.terminate()
+        time.sleep(0.1)
