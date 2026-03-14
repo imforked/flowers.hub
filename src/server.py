@@ -1,12 +1,13 @@
 import sys
 from pathlib import Path
 
-
+# Ensure we load the standard library 'os', not a local os.py in cwd or script dir
 _script_dir = str(Path(__file__).resolve().parent)
-if sys.path and sys.path[0] == _script_dir:
-    sys.path.pop(0)
+_paths_to_restore = [p for p in sys.path if p in (_script_dir, "", ".")]
+sys.path = [p for p in sys.path if p not in (_script_dir, "", ".")]
 import os
-sys.path.insert(0, _script_dir)
+for p in reversed(_paths_to_restore):
+    sys.path.insert(0, p)
 
 import base64
 import logging
