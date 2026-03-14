@@ -2,20 +2,19 @@ import sys
 import importlib.util
 from pathlib import Path
 
-# Load standard library 'os' explicitly (avoid shadowing by a local os.py on sys.path)
-try:
-    _stdlib_dir = Path(importlib.__file__).resolve().parent.parent
-    _os_path = _stdlib_dir / "os.py"
-    if _os_path.exists():
-        _os_spec = importlib.util.spec_from_file_location("os", _os_path)
-        os = importlib.util.module_from_spec(_os_spec)
-        sys.modules["os"] = os
-        _os_spec.loader.exec_module(os)
-    else:
-        import os
-except Exception:
-    import os
+# Load real stdlib 'os' from interpreter base (avoids shadowing by local os.py when running from src/)
+_stdlib = Path(sys.base_prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
+_os_py = _stdlib / "os.py"
+if not _os_py.exists():
+    _stdlib = Path(importlib.__file__).resolve().parent.parent
+    _os_py = _stdlib / "os.py"
+if _os_py.exists():
+    _spec = importlib.util.spec_from_file_location("os", _os_py)
+    _os_mod = importlib.util.module_from_spec(_spec)
+    sys.modules["os"] = _os_mod
+    _spec.loader.exec_module(_os_mod)
 
+import os
 import base64
 import logging
 import threading
