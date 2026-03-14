@@ -1,29 +1,38 @@
+"""
+Wake word detection with Picovoice Porcupine. Uses custom "flowers" wake word.
+Create the model at https://console.picovoice.ai and download the .ppn for your platform.
+"""
 from dotenv import load_dotenv
 import os
+import time
+import numpy as np
 import pvporcupine
 import sounddevice as sd
-import numpy as np
-import time
 
-# Load environment variables from .env
 load_dotenv()
 access_key = os.environ.get("PICOVOICE_KEY")
 
-# Porcupine requires 16 kHz; try these device rates (first supported wins)
+# Custom "flowers" wake word: voice-models/flowers.ppn
+_dir = os.path.dirname(os.path.abspath(__file__))
+KEYWORD_PATH = os.path.join(_dir, "voice-models", "flowers.ppn")
+if not os.path.isfile(KEYWORD_PATH):
+    raise FileNotFoundError(
+        f'Wake word model not found at {KEYWORD_PATH}. '
+        "Add flowers.ppn to src/voice-models/ (create at https://console.picovoice.ai)."
+    )
+
+# Porcupine expects 16 kHz; try these device rates (ALSA often rejects 8 kHz)
 CANDIDATE_RATES = [16000, 8000, 48000, 44100]
 
-# Create Porcupine instance (expects 16 kHz)
 porcupine = pvporcupine.create(
     access_key=access_key,
-    keywords=["flowers"]
+    keyword_paths=[KEYWORD_PATH],
 )
-
 PORCUPINE_RATE = porcupine.sample_rate
 FRAME_LEN = porcupine.frame_length
 
 
 def pick_input_rate():
-    """Use the first candidate rate the device supports (ALSA often rejects 8 kHz)."""
     for rate in CANDIDATE_RATES:
         try:
             sd.check_input_settings(device=None, channels=1, dtype="int16", samplerate=rate)
@@ -37,7 +46,6 @@ def pick_input_rate():
 
 
 def resample_to_16k(pcm: np.ndarray, from_rate: int) -> np.ndarray:
-    """Resample one frame from device rate to Porcupine's 16 kHz."""
     n_in = len(pcm)
     n_out = FRAME_LEN
     if n_in == n_out:
@@ -56,15 +64,13 @@ def make_callback(device_rate: int):
     return callback
 
 
-# Resolve device rate and block size
 DEVICE_RATE = pick_input_rate()
-# Samples per callback: one Porcupine frame worth of time at device rate
 blocksize = max(1, int(FRAME_LEN * DEVICE_RATE / PORCUPINE_RATE))
 
 if DEVICE_RATE != PORCUPINE_RATE:
-    print(f"Listening at {DEVICE_RATE} Hz (resampled to {PORCUPINE_RATE} Hz for Porcupine)... say the wake word!")
+    print(f"Listening at {DEVICE_RATE} Hz (resampled to {PORCUPINE_RATE} Hz for Porcupine)... say \"flowers\"!")
 else:
-    print("Listening... say the wake word!")
+    print('Listening... say "flowers"!')
 
 with sd.InputStream(
     samplerate=DEVICE_RATE,
