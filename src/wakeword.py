@@ -1,8 +1,7 @@
 """
 Wake word detection with Picovoice Porcupine. Uses custom "flowers" wake word.
-After "flowers", listens for "play messages" and triggers playback via the local server.
+After "flowers", listens for "play messages" and invokes the given callback.
 """
-from dotenv import load_dotenv
 import os
 import time
 import threading
@@ -10,39 +9,19 @@ import numpy as np
 import pvporcupine
 import sounddevice as sd
 import speech_recognition as sr
-import requests
 
-load_dotenv()
-access_key = os.environ.get("PICOVOICE_KEY")
-
-# Custom "flowers" wake word: voice-models/flowers.ppn
-_dir = os.path.dirname(os.path.abspath(__file__))
-KEYWORD_PATH = os.path.join(_dir, "voice-models", "flowers.ppn")
-if not os.path.isfile(KEYWORD_PATH):
-    raise FileNotFoundError(
-        f'Wake word model not found at {KEYWORD_PATH}. '
-        "Add flowers.ppn to src/voice-models/ (create at https://console.picovoice.ai)."
-    )
-
-# Porcupine expects 16 kHz; try these device rates (ALSA often rejects 8 kHz)
 CANDIDATE_RATES = [16000, 8000, 48000, 44100]
 COMMAND_RECORD_SEC = 3.0
-PLAY_MESSAGES_URL = os.environ.get("PLAY_MESSAGES_URL", "http://127.0.0.1:5000/play-latest")
 
-porcupine = pvporcupine.create(
-    access_key=access_key,
-    keyword_paths=[KEYWORD_PATH],
-)
-PORCUPINE_RATE = porcupine.sample_rate
-FRAME_LEN = porcupine.frame_length
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+KEYWORD_PATH = os.path.join(_SCRIPT_DIR, "voice-models", "flowers.ppn")
 
-# Command recording state (used from callback + worker thread)
 _record_until = 0.0
 _command_buffer = []
 _lock = threading.Lock()
 
 
-def pick_input_rate():
+def _pick_input_rate():
     for rate in CANDIDATE_RATES:
         try:
             sd.check_input_settings(device=None, channels=1, dtype="int16", samplerate=rate)
@@ -55,7 +34,7 @@ def pick_input_rate():
     )
 
 
-def resample_to_16k(pcm: np.ndarray, n_out: int) -> np.ndarray:
+def _resample_to_16k(pcm: np.ndarray, n_out: int) -> np.ndarray:
     n_in = len(pcm)
     if n_in == n_out:
         return pcm.astype(np.int16)
@@ -64,8 +43,7 @@ def resample_to_16k(pcm: np.ndarray, n_out: int) -> np.ndarray:
     return np.interp(x_new, x_old, pcm.astype(np.float64)).astype(np.int16)
 
 
-def process_command_audio(audio_16k: np.ndarray):
-    """Run STT and trigger play-latest if 'play messages' heard."""
+def _process_command_audio(audio_16k: np.ndarray, on_play_messages):
     try:
         recognizer = sr.Recognizer()
         ad = sr.AudioData(audio_16k.tobytes(), 16000, 2)
@@ -76,17 +54,38 @@ def process_command_audio(audio_16k: np.ndarray):
         return
     text = (text or "").strip().lower()
     if "play messages" in text or "play message" in text:
-        try:
-            requests.post(PLAY_MESSAGES_URL, timeout=10)
-        except requests.RequestException:
-            pass
+        on_play_messages()
 
 
-def make_callback(device_rate: int):
+def run_listener(on_play_messages):
+    """
+    Run the wake word listener in the current thread. Blocks until the process exits.
+    When "play messages" is heard after "flowers", calls on_play_messages() (no arguments).
+    """
+    global _record_until, _command_buffer
+    if not os.path.isfile(KEYWORD_PATH):
+        raise FileNotFoundError(
+            f"Wake word model not found at {KEYWORD_PATH}. "
+            "Add flowers.ppn to src/voice-models/ (create at https://console.picovoice.ai)."
+        )
+    access_key = os.environ.get("PICOVOICE_KEY")
+    if not access_key:
+        raise ValueError("PICOVOICE_KEY environment variable is required for wake word.")
+
+    porcupine = pvporcupine.create(
+        access_key=access_key,
+        keyword_paths=[KEYWORD_PATH],
+    )
+    porcupine_rate = porcupine.sample_rate
+    frame_len = porcupine.frame_length
+
+    device_rate = _pick_input_rate()
+    blocksize = max(1, int(frame_len * device_rate / porcupine_rate))
+
     def callback(indata, frames, time_info, status):
         global _record_until, _command_buffer
         pcm = np.squeeze(indata).astype(np.int16)
-        pcm_16k = resample_to_16k(pcm, FRAME_LEN)
+        pcm_16k = _resample_to_16k(pcm, frame_len)
         if porcupine.process(pcm_16k.tolist()) >= 0:
             with _lock:
                 _record_until = time.time() + COMMAND_RECORD_SEC
@@ -104,24 +103,21 @@ def make_callback(device_rate: int):
                     _record_until = 0.0
                 return
 
-        # Resample full command to 16 kHz and run STT in a thread
         raw = np.concatenate(chunks)
         n_out = int(len(raw) * 16000 / device_rate)
-        audio_16k = resample_to_16k(raw, n_out)
-        threading.Thread(target=process_command_audio, args=(audio_16k,), daemon=True).start()
+        audio_16k = _resample_to_16k(raw, n_out)
+        threading.Thread(
+            target=_process_command_audio,
+            args=(audio_16k, on_play_messages),
+            daemon=True,
+        ).start()
 
-    return callback
-
-
-DEVICE_RATE = pick_input_rate()
-blocksize = max(1, int(FRAME_LEN * DEVICE_RATE / PORCUPINE_RATE))
-
-with sd.InputStream(
-    samplerate=DEVICE_RATE,
-    channels=1,
-    dtype="int16",
-    blocksize=blocksize,
-    callback=make_callback(DEVICE_RATE),
-):
-    while True:
-        time.sleep(0.1)
+    with sd.InputStream(
+        samplerate=device_rate,
+        channels=1,
+        dtype="int16",
+        blocksize=blocksize,
+        callback=callback,
+    ):
+        while True:
+            time.sleep(0.1)
