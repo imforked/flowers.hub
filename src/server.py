@@ -1,4 +1,13 @@
+import sys
+from pathlib import Path
+
+
+_script_dir = str(Path(__file__).resolve().parent)
+if sys.path and sys.path[0] == _script_dir:
+    sys.path.pop(0)
 import os
+sys.path.insert(0, _script_dir)
+
 import base64
 import logging
 import threading
