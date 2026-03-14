@@ -1,20 +1,12 @@
+# Avoid shadowed 'os' (e.g. os.py in cwd): load real os before other imports
 import sys
-import importlib.util
 from pathlib import Path
-
-# Load real stdlib 'os' from interpreter base (avoids shadowing by local os.py when running from src/)
-_stdlib = Path(sys.base_prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
-_os_py = _stdlib / "os.py"
-if not _os_py.exists():
-    _stdlib = Path(importlib.__file__).resolve().parent.parent
-    _os_py = _stdlib / "os.py"
-if _os_py.exists():
-    _spec = importlib.util.spec_from_file_location("os", _os_py)
-    _os_mod = importlib.util.module_from_spec(_spec)
-    sys.modules["os"] = _os_mod
-    _spec.loader.exec_module(_os_mod)
-
+_script_dir = Path(__file__).resolve().parent
+_save_path = sys.path.copy()
+sys.path = [p for p in sys.path if p not in (str(_script_dir), "", ".")]
 import os
+sys.path = _save_path
+
 import base64
 import logging
 import threading
