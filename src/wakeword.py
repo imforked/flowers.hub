@@ -1,13 +1,16 @@
 """
 Wake word detection with Picovoice Porcupine. Uses custom "flowers" wake word.
-Create the model at https://console.picovoice.ai and download the .ppn for your platform.
+After "flowers", listens for "play messages" and triggers playback via the local server.
 """
 from dotenv import load_dotenv
 import os
 import time
+import threading
 import numpy as np
 import pvporcupine
 import sounddevice as sd
+import speech_recognition as sr
+import requests
 
 load_dotenv()
 access_key = os.environ.get("PICOVOICE_KEY")
@@ -23,6 +26,8 @@ if not os.path.isfile(KEYWORD_PATH):
 
 # Porcupine expects 16 kHz; try these device rates (ALSA often rejects 8 kHz)
 CANDIDATE_RATES = [16000, 8000, 48000, 44100]
+COMMAND_RECORD_SEC = 3.0
+PLAY_MESSAGES_URL = os.environ.get("PLAY_MESSAGES_URL", "http://127.0.0.1:5000/play-latest")
 
 porcupine = pvporcupine.create(
     access_key=access_key,
@@ -30,6 +35,11 @@ porcupine = pvporcupine.create(
 )
 PORCUPINE_RATE = porcupine.sample_rate
 FRAME_LEN = porcupine.frame_length
+
+# Command recording state (used from callback + worker thread)
+_record_until = 0.0
+_command_buffer = []
+_lock = threading.Lock()
 
 
 def pick_input_rate():
@@ -45,9 +55,8 @@ def pick_input_rate():
     )
 
 
-def resample_to_16k(pcm: np.ndarray, from_rate: int) -> np.ndarray:
+def resample_to_16k(pcm: np.ndarray, n_out: int) -> np.ndarray:
     n_in = len(pcm)
-    n_out = FRAME_LEN
     if n_in == n_out:
         return pcm.astype(np.int16)
     x_old = np.arange(n_in, dtype=np.float64)
@@ -55,22 +64,57 @@ def resample_to_16k(pcm: np.ndarray, from_rate: int) -> np.ndarray:
     return np.interp(x_new, x_old, pcm.astype(np.float64)).astype(np.int16)
 
 
+def process_command_audio(audio_16k: np.ndarray):
+    """Run STT and trigger play-latest if 'play messages' heard."""
+    try:
+        recognizer = sr.Recognizer()
+        ad = sr.AudioData(audio_16k.tobytes(), 16000, 2)
+        text = recognizer.recognize_google(ad, language="en-US")
+    except sr.UnknownValueError:
+        return
+    except Exception:
+        return
+    text = (text or "").strip().lower()
+    if "play messages" in text or "play message" in text:
+        try:
+            requests.post(PLAY_MESSAGES_URL, timeout=10)
+        except requests.RequestException:
+            pass
+
+
 def make_callback(device_rate: int):
     def callback(indata, frames, time_info, status):
+        global _record_until, _command_buffer
         pcm = np.squeeze(indata).astype(np.int16)
-        pcm_16k = resample_to_16k(pcm, device_rate)
+        pcm_16k = resample_to_16k(pcm, FRAME_LEN)
         if porcupine.process(pcm_16k.tolist()) >= 0:
-            print("Wake word detected!")
+            with _lock:
+                _record_until = time.time() + COMMAND_RECORD_SEC
+
+        with _lock:
+            if _record_until > 0 and time.time() < _record_until:
+                _command_buffer.append(pcm.copy())
+                return
+            if _record_until > 0 and time.time() >= _record_until and _command_buffer:
+                chunks = _command_buffer.copy()
+                _command_buffer = []
+                _record_until = 0.0
+            else:
+                if _record_until > 0 and time.time() >= _record_until:
+                    _record_until = 0.0
+                return
+
+        # Resample full command to 16 kHz and run STT in a thread
+        raw = np.concatenate(chunks)
+        n_out = int(len(raw) * 16000 / device_rate)
+        audio_16k = resample_to_16k(raw, n_out)
+        threading.Thread(target=process_command_audio, args=(audio_16k,), daemon=True).start()
+
     return callback
 
 
 DEVICE_RATE = pick_input_rate()
 blocksize = max(1, int(FRAME_LEN * DEVICE_RATE / PORCUPINE_RATE))
-
-if DEVICE_RATE != PORCUPINE_RATE:
-    print(f"Listening at {DEVICE_RATE} Hz (resampled to {PORCUPINE_RATE} Hz for Porcupine)... say \"flowers\"!")
-else:
-    print('Listening... say "flowers"!')
 
 with sd.InputStream(
     samplerate=DEVICE_RATE,
