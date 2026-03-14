@@ -1,12 +1,4 @@
-# Avoid shadowed 'os' (e.g. os.py in cwd): load real os before other imports
-import sys
-from pathlib import Path
-_script_dir = Path(__file__).resolve().parent
-_save_path = sys.path.copy()
-sys.path = [p for p in sys.path if p not in (str(_script_dir), "", ".")]
 import os
-sys.path = _save_path
-
 import base64
 import logging
 import threading
