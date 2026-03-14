@@ -1,13 +1,15 @@
 """
 Wake word detection with Picovoice Porcupine. Uses custom "flowers" wake word.
 After "flowers", listens for "play messages" and invokes the given callback.
+Uses only stdlib + PyAudio (no numpy).
 """
 import os
 import time
 import threading
-import numpy as np
+import array
+import struct
 import pvporcupine
-import sounddevice as sd
+import pyaudio
 import speech_recognition as sr
 
 CANDIDATE_RATES = [16000, 8000, 48000, 44100]
@@ -24,9 +26,17 @@ _lock = threading.Lock()
 def _pick_input_rate():
     for rate in CANDIDATE_RATES:
         try:
-            sd.check_input_settings(device=None, channels=1, dtype="int16", samplerate=rate)
+            pa = pyaudio.PyAudio()
+            pa.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=rate,
+                input=True,
+                frames_per_buffer=1024,
+            ).close()
+            pa.terminate()
             return rate
-        except sd.PortAudioError:
+        except Exception:
             continue
     raise RuntimeError(
         f"None of {CANDIDATE_RATES} Hz supported by input device. "
@@ -34,16 +44,25 @@ def _pick_input_rate():
     )
 
 
-def _resample_to_16k(pcm: np.ndarray, n_out: int) -> np.ndarray:
+def _resample_to_16k(pcm: array.array, n_out: int) -> array.array:
+    """Linear interpolation resample to n_out int16 samples."""
     n_in = len(pcm)
     if n_in == n_out:
-        return pcm.astype(np.int16)
-    x_old = np.arange(n_in, dtype=np.float64)
-    x_new = np.linspace(0, n_in - 1, n_out, dtype=np.float64)
-    return np.interp(x_new, x_old, pcm.astype(np.float64)).astype(np.int16)
+        return array.array("h", pcm)
+    out = array.array("h")
+    out_append = out.append
+    for i in range(n_out):
+        pos = (n_in - 1) * i / (n_out - 1) if n_out > 1 else 0
+        j = int(pos)
+        j = min(j, n_in - 2)
+        frac = pos - j
+        y0, y1 = pcm[j], pcm[j + 1]
+        sample = int(y0 + (y1 - y0) * frac + 0.5)
+        out_append(max(-32768, min(32767, sample)))
+    return out
 
 
-def _process_command_audio(audio_16k: np.ndarray, on_play_messages):
+def _process_command_audio(audio_16k: array.array, on_play_messages):
     try:
         recognizer = sr.Recognizer()
         ad = sr.AudioData(audio_16k.tobytes(), 16000, 2)
@@ -80,44 +99,52 @@ def run_listener(on_play_messages):
     frame_len = porcupine.frame_length
 
     device_rate = _pick_input_rate()
-    blocksize = max(1, int(frame_len * device_rate / porcupine_rate))
+    chunk_size = max(1, int(frame_len * device_rate / porcupine_rate))
 
-    def callback(indata, frames, time_info, status):
-        global _record_until, _command_buffer
-        pcm = np.squeeze(indata).astype(np.int16)
-        pcm_16k = _resample_to_16k(pcm, frame_len)
-        if porcupine.process(pcm_16k.tolist()) >= 0:
-            with _lock:
-                _record_until = time.time() + COMMAND_RECORD_SEC
-
-        with _lock:
-            if _record_until > 0 and time.time() < _record_until:
-                _command_buffer.append(pcm.copy())
-                return
-            if _record_until > 0 and time.time() >= _record_until and _command_buffer:
-                chunks = _command_buffer.copy()
-                _command_buffer = []
-                _record_until = 0.0
-            else:
-                if _record_until > 0 and time.time() >= _record_until:
-                    _record_until = 0.0
-                return
-
-        raw = np.concatenate(chunks)
-        n_out = int(len(raw) * 16000 / device_rate)
-        audio_16k = _resample_to_16k(raw, n_out)
-        threading.Thread(
-            target=_process_command_audio,
-            args=(audio_16k, on_play_messages),
-            daemon=True,
-        ).start()
-
-    with sd.InputStream(
-        samplerate=device_rate,
+    pa = pyaudio.PyAudio()
+    stream = pa.open(
+        format=pyaudio.paInt16,
         channels=1,
-        dtype="int16",
-        blocksize=blocksize,
-        callback=callback,
-    ):
+        rate=device_rate,
+        input=True,
+        frames_per_buffer=chunk_size,
+    )
+
+    try:
         while True:
-            time.sleep(0.1)
+            raw = stream.read(chunk_size, exception_on_overflow=False)
+            pcm = array.array("h")
+            pcm.frombytes(raw)
+            pcm_16k = _resample_to_16k(pcm, frame_len)
+            if porcupine.process(pcm_16k.tolist()) >= 0:
+                with _lock:
+                    _record_until = time.time() + COMMAND_RECORD_SEC
+
+            with _lock:
+                if _record_until > 0 and time.time() < _record_until:
+                    _command_buffer.append(array.array("h", pcm))
+                    continue
+                if _record_until > 0 and time.time() >= _record_until and _command_buffer:
+                    chunks = list(_command_buffer)
+                    _command_buffer.clear()
+                    _record_until = 0.0
+                else:
+                    if _record_until > 0 and time.time() >= _record_until:
+                        _record_until = 0.0
+                    continue
+
+            raw_arr = array.array("h")
+            for c in chunks:
+                raw_arr.extend(c)
+            n_out = int(len(raw_arr) * 16000 / device_rate)
+            audio_16k = _resample_to_16k(raw_arr, n_out)
+            threading.Thread(
+                target=_process_command_audio,
+                args=(audio_16k, on_play_messages),
+                daemon=True,
+            ).start()
+    finally:
+        stream.stop_stream()
+        stream.close()
+        pa.terminate()
+

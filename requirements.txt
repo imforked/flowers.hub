@@ -3,6 +3,5 @@ pygame
 flask
 python-dotenv
 pvporcupine
-sounddevice
-numpy
+PyAudio
 SpeechRecognition
