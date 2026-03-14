@@ -1,13 +1,20 @@
 import sys
+import importlib.util
 from pathlib import Path
 
-# Ensure we load the standard library 'os', not a local os.py in cwd or script dir
-_script_dir = str(Path(__file__).resolve().parent)
-_paths_to_restore = [p for p in sys.path if p in (_script_dir, "", ".")]
-sys.path = [p for p in sys.path if p not in (_script_dir, "", ".")]
-import os
-for p in reversed(_paths_to_restore):
-    sys.path.insert(0, p)
+# Load standard library 'os' explicitly (avoid shadowing by a local os.py on sys.path)
+try:
+    _stdlib_dir = Path(importlib.__file__).resolve().parent.parent
+    _os_path = _stdlib_dir / "os.py"
+    if _os_path.exists():
+        _os_spec = importlib.util.spec_from_file_location("os", _os_path)
+        os = importlib.util.module_from_spec(_os_spec)
+        sys.modules["os"] = os
+        _os_spec.loader.exec_module(os)
+    else:
+        import os
+except Exception:
+    import os
 
 import base64
 import logging
