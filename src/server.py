@@ -2,6 +2,7 @@ import os
 import base64
 import logging
 import threading
+import time
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import shutil
@@ -18,6 +19,14 @@ ensure_dirs(STORAGE_ROOT)
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+def has_unheard_messages():
+    """True if there is at least one unheard message (WAV in storage)."""
+    unheard_dir = os.path.join(STORAGE_ROOT, "unheard")
+    if not os.path.isdir(unheard_dir):
+        return False
+    return any(f.endswith(".wav") for f in os.listdir(unheard_dir))
 
 
 def play_latest_message():
@@ -102,7 +111,24 @@ def _start_wake_word_listener():
         app.logger.exception("Wake word listener error: %s", e)
 
 
+def _run_light_controller():
+    """Run breathing animation while unheard messages exist; lights off otherwise."""
+    try:
+        from breathing_fade import init_lights, lights_off, run_breathing_until
+        if not init_lights():
+            app.logger.warning("Lights not started: RPi.GPIO not available")
+            return
+        while True:
+            if has_unheard_messages():
+                run_breathing_until(lambda: not has_unheard_messages())
+            else:
+                lights_off()
+                time.sleep(2)
+    except Exception as e:
+        app.logger.exception("Light controller error: %s", e)
+
+
 if __name__ == "__main__":
-    thread = threading.Thread(target=_start_wake_word_listener, daemon=True)
-    thread.start()
+    threading.Thread(target=_start_wake_word_listener, daemon=True).start()
+    threading.Thread(target=_run_light_controller, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT, debug=True)
