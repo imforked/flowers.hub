@@ -15,7 +15,7 @@ CANDIDATE_RATES = [16000, 8000, 48000, 44100]
 # Create Porcupine instance (expects 16 kHz)
 porcupine = pvporcupine.create(
     access_key=access_key,
-    keywords=["picovoice"]
+    keywords=["flowers"]
 )
 
 PORCUPINE_RATE = porcupine.sample_rate
