@@ -12,7 +12,7 @@ import pvporcupine
 import pyaudio
 import speech_recognition as sr
 
-CANDIDATE_RATES = [16000, 8000, 48000, 44100]
+CANDIDATE_RATES = [16000, 8000, 48000, 44100, 22050, 11025, 96000, 88200]
 COMMAND_RECORD_SEC = 3.0
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,24 +24,38 @@ _lock = threading.Lock()
 
 
 def _pick_input_rate():
-    for rate in CANDIDATE_RATES:
+    pa = pyaudio.PyAudio()
+    try:
+        # Prefer the default input device's default sample rate
         try:
-            pa = pyaudio.PyAudio()
-            pa.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=rate,
-                input=True,
-                frames_per_buffer=1024,
-            ).close()
-            pa.terminate()
-            return rate
+            dev = pa.get_default_input_device_info()
+            default_rate = int(dev.get("defaultSampleRate", 0))
+            if default_rate > 0 and default_rate not in CANDIDATE_RATES:
+                rates_to_try = [default_rate] + CANDIDATE_RATES
+            else:
+                rates_to_try = CANDIDATE_RATES
         except Exception:
-            continue
-    raise RuntimeError(
-        f"None of {CANDIDATE_RATES} Hz supported by input device. "
-        "Check ALSA/PulseAudio and try a different mic."
-    )
+            rates_to_try = CANDIDATE_RATES
+
+        for rate in rates_to_try:
+            try:
+                stream = pa.open(
+                    format=pyaudio.paInt16,
+                    channels=1,
+                    rate=rate,
+                    input=True,
+                    frames_per_buffer=1024,
+                )
+                stream.close()
+                return rate
+            except Exception:
+                continue
+        raise RuntimeError(
+            f"No supported input sample rate found (tried {rates_to_try}). "
+            "Check ALSA/PulseAudio and microphone."
+        )
+    finally:
+        pa.terminate()
 
 
 def _resample_to_16k(pcm: array.array, n_out: int) -> array.array:
