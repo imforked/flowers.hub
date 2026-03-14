@@ -1,3 +1,11 @@
+import sys
+from pathlib import Path
+
+# Ensure src/ is on path when run as python -m src.server from project root
+_src_dir = Path(__file__).resolve().parent
+if str(_src_dir) not in sys.path:
+    sys.path.insert(0, str(_src_dir))
+
 import os
 import base64
 import logging
