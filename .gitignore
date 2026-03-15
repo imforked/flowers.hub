@@ -3,3 +3,6 @@ messages/heard/*
 .env
 __pycache__/
 *.pyc
+
+# Vosk model zip (~40MB); unzip on device before first run (see src/voice-models/README.md)
+src/voice-models/vosk-model-small-en-us-0.15.zip
