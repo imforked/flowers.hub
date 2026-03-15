@@ -3,8 +3,7 @@ Wake word detection with Picovoice Porcupine. Uses custom "flowers" wake word.
 After "flowers", listens for "play messages" and invokes the given callback.
 Uses only stdlib + PyAudio (no numpy). Optional: pyalsaaudio for ALSA-direct capture.
 
-Command phrase recognition: Picovoice Leopard (on-device). Same PICOVOICE_KEY as
-Porcupine. No separate model download; pip install pvleopard works on Raspberry Pi.
+Command phrase recognition: PocketSphinx (on-device, offline). No internet required.
 
 SD-card safety: bounded command buffer, safe device open/close, and minimal
 writes to avoid corruption on power brownouts when USB mics are connected.
@@ -19,15 +18,14 @@ import logging
 import pvporcupine
 
 try:
+    from pocketsphinx import Decoder
+except ImportError:
+    Decoder = None
+
+try:
     import alsaaudio
 except ImportError:
     alsaaudio = None
-
-try:
-    import pvleopard
-    _LEOPARD_AVAILABLE = True
-except ImportError:
-    _LEOPARD_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -52,47 +50,43 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYWORD_PATH = os.path.join(_SCRIPT_DIR, "voice-models", "flowers.ppn")
 
 _record_until = 0.0
-_leopard = None
-_leopard_lock = threading.Lock()
+_sphinx_decoder = None
+_sphinx_lock = threading.Lock()
 
 
-def _get_leopard():
-    """Lazy-load Leopard STT once. Returns Leopard instance or None if not available."""
-    global _leopard
-    with _leopard_lock:
-        if _leopard is not None:
-            return _leopard
-        if not _LEOPARD_AVAILABLE:
-            return None
-        access_key = os.environ.get("PICOVOICE_KEY", "").strip()
-        if not access_key:
+def _get_sphinx_decoder():
+    """Lazy-create PocketSphinx Decoder once (default US English, 16 kHz)."""
+    global _sphinx_decoder
+    with _sphinx_lock:
+        if _sphinx_decoder is not None:
+            return _sphinx_decoder
+        if Decoder is None:
             return None
         try:
-            _leopard = pvleopard.create(access_key=access_key)
-            logger.info("Leopard speech-to-text loaded")
-            return _leopard
+            _sphinx_decoder = Decoder(samprate=16000)
+            logger.info("PocketSphinx decoder loaded")
+            return _sphinx_decoder
         except Exception as e:
-            logger.warning("Leopard load failed: %s", e)
+            logger.warning("PocketSphinx decoder failed: %s", e)
             return None
 
 
-def _recognize_with_leopard(audio_16k: array.array):
-    """Return recognized text or None. Audio must be 16 kHz mono int16."""
-    leopard = _get_leopard()
-    if leopard is None:
+def _recognize_command(audio_16k: array.array):
+    """Recognize command phrase from 16 kHz mono int16 audio. Uses PocketSphinx (offline)."""
+    decoder = _get_sphinx_decoder()
+    if decoder is None:
         return None
-    # Leopard.process() expects 16-bit PCM at leopard.sample_rate (usually 16000)
-    if leopard.sample_rate == 16000:
-        pcm = audio_16k.tolist()
-    else:
-        n_out = int(len(audio_16k) * leopard.sample_rate / 16000)
-        pcm = _resample_to_16k(audio_16k, n_out).tolist()
-    try:
-        transcript, _ = leopard.process(pcm)
-        return (transcript or "").strip().lower() or None
-    except Exception as e:
-        logger.debug("Leopard recognition failed: %s", e)
-        return None
+    with _sphinx_lock:
+        try:
+            decoder.start_utt()
+            decoder.process_raw(audio_16k.tobytes(), full_utt=True)
+            decoder.end_utt()
+            hyp = decoder.hyp()
+            text = (hyp.hypstr if hyp else "").strip().lower() or None
+            return text
+        except Exception as e:
+            logger.debug("PocketSphinx recognition failed: %s", e)
+            return None
 
 
 _record_until = 0.0
@@ -205,8 +199,7 @@ def _resample_to_16k(pcm: array.array, n_out: int) -> array.array:
 
 
 def _process_command_audio(audio_16k: array.array, on_play_messages):
-    # Leopard (on-device); same PICOVOICE_KEY as Porcupine
-    text = _recognize_with_leopard(audio_16k)
+    text = _recognize_command(audio_16k)
     if text is None:
         logger.debug("Command phrase: no speech recognized")
         return

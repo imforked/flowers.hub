@@ -4,7 +4,7 @@ Test the wake word listener in isolation (no Flask server).
 Run from project root:  python src/test_wakeword.py
 Or from src/:             python test_wakeword.py
 
-Requires: .env with PICOVOICE_KEY, src/voice-models/flowers.ppn, and pvleopard (pip install pvleopard)
+Requires: .env with PICOVOICE_KEY, src/voice-models/flowers.ppn, and PocketSphinx.
 
 Then say "flowers" and within a few seconds "play messages" (or "play message").
 You should see "*** PLAY MESSAGES TRIGGERED ***" when it works.
