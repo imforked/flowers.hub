@@ -1,12 +1,13 @@
 """
 Wake word detection with Picovoice Porcupine. Uses custom "flowers" wake word.
 After "flowers", listens for "play messages" and invokes the given callback.
-Uses only stdlib + PyAudio (no numpy).
+Uses only stdlib + PyAudio (no numpy). Optional: pyalsaaudio for ALSA-direct capture.
 
 SD-card safety: bounded command buffer, safe device open/close, and minimal
 writes to avoid corruption on power brownouts when USB mics are connected.
 """
 import os
+import sys
 import time
 import threading
 import array
@@ -15,6 +16,11 @@ import logging
 import pvporcupine
 import pyaudio
 import speech_recognition as sr
+
+try:
+    import alsaaudio
+except ImportError:
+    alsaaudio = None
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +157,91 @@ def _process_command_audio(audio_16k: array.array, on_play_messages):
         on_play_messages()
 
 
+def _pick_alsa_capture_card(frame_len: int, max_cards: int = 5):
+    """
+    Try opening ALSA plughw:N,0 for capture at 16 kHz. Return first card index that works, or None.
+    Tries card 1, 2, ... first (typical USB mics), then card 0 (built-in).
+    """
+    if alsaaudio is None:
+        return None
+    cards_to_try = list(range(1, max_cards)) + [0]  # prefer 1,2,... then 0
+    for card in cards_to_try:
+        try:
+            pcm = alsaaudio.PCM(
+                alsaaudio.PCM_CAPTURE,
+                device=f"plughw:{card},0",
+                rate=16000,
+                channels=1,
+                format=alsaaudio.PCM_FORMAT_S16_LE,
+                periodsize=frame_len,
+            )
+            if hasattr(pcm, "close"):
+                pcm.close()
+            return str(card)
+        except Exception:
+            continue
+    return None
+
+
+def _run_listener_alsa(porcupine, frame_len, on_play_messages, card: str):
+    """
+    Run the listener using ALSA directly (plughw:CARD,0). Bypasses PyAudio for reliable USB mic use.
+    """
+    global _record_until, _command_buffer
+    device = f"plughw:{card},0"
+    # 16 kHz mono so no resampling; plughw does rate conversion if the hardware rate differs
+    pcm = alsaaudio.PCM(
+        alsaaudio.PCM_CAPTURE,
+        device=device,
+        rate=16000,
+        channels=1,
+        format=alsaaudio.PCM_FORMAT_S16_LE,
+        periodsize=frame_len,
+    )
+    logger.info("Wake word listener using ALSA %s (16 kHz mono)", device)
+
+    buf = array.array("h")
+    try:
+        while True:
+            length, data = pcm.read()
+            if length <= 0:
+                continue
+            pcm_chunk = array.array("h")
+            pcm_chunk.frombytes(data)
+            buf.extend(pcm_chunk)
+            while len(buf) >= frame_len:
+                frame = array.array("h", buf[:frame_len])
+                del buf[:frame_len]
+                if porcupine.process(frame.tolist()) >= 0:
+                    with _lock:
+                        _record_until = time.time() + COMMAND_RECORD_SEC
+
+                with _lock:
+                    if _record_until > 0 and time.time() < _record_until:
+                        if len(_command_buffer) < COMMAND_BUFFER_MAX_CHUNKS:
+                            _command_buffer.append(array.array("h", frame))
+                        continue
+                    if _record_until > 0 and time.time() >= _record_until and _command_buffer:
+                        chunks = list(_command_buffer)
+                        _command_buffer.clear()
+                        _record_until = 0.0
+                    else:
+                        if _record_until > 0 and time.time() >= _record_until:
+                            _record_until = 0.0
+                        continue
+
+                raw_arr = array.array("h")
+                for c in chunks:
+                    raw_arr.extend(c)
+                threading.Thread(
+                    target=_process_command_audio,
+                    args=(raw_arr, on_play_messages),
+                    daemon=True,
+                ).start()
+    except KeyboardInterrupt:
+        logger.info("Wake word listener interrupted")
+
+
 def _open_stream_with_retry(pa, device_index, device_rate, chunk_size):
     """Open input stream with retries (handles mic hot-plug / ALSA re-enumeration)."""
     last_err = None
@@ -200,6 +291,16 @@ def run_listener(on_play_messages):
     )
     porcupine_rate = porcupine.sample_rate
     frame_len = porcupine.frame_length
+
+    # On Linux with pyalsaaudio, use ALSA directly so the USB mic works without fragile env/config
+    if sys.platform == "linux" and alsaaudio is not None:
+        card = os.environ.get("AUDIO_INPUT_CARD", "").strip() or _pick_alsa_capture_card(frame_len)
+        if card is not None:
+            try:
+                _run_listener_alsa(porcupine, frame_len, on_play_messages, card)
+            finally:
+                porcupine.delete()
+            return
 
     device_index, device_rate = _pick_input_rate()
     chunk_size = max(1, int(frame_len * device_rate / porcupine_rate))
