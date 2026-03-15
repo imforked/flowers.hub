@@ -140,6 +140,14 @@ def _start_wake_word_listener():
         app.logger.warning("Wake word not started: %s", e)
     except ValueError as e:
         app.logger.warning("Wake word not started: %s", e)
+    except RuntimeError as e:
+        if "input" in str(e).lower() and ("sample rate" in str(e) or "device" in str(e)):
+            app.logger.warning(
+                "Wake word disabled: no working microphone. %s Check mic connection and ALSA (arecord -l).",
+                e,
+            )
+        else:
+            app.logger.exception("Wake word listener error: %s", e)
     except Exception as e:
         app.logger.exception("Wake word listener error: %s", e)
 

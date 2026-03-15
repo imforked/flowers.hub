@@ -35,35 +35,63 @@ _lock = threading.Lock()
 
 
 def _pick_input_rate():
+    """
+    Find a working (device_index, sample_rate). Tries default input first,
+    then all other input devices. Raises RuntimeError if no working input.
+    """
     pa = pyaudio.PyAudio()
     try:
-        # Prefer the default input device's default sample rate
+        # Build list of input device indices: default first, then rest
+        input_indices = []
         try:
-            dev = pa.get_default_input_device_info()
-            default_rate = int(dev.get("defaultSampleRate", 0))
-            if default_rate > 0 and default_rate not in CANDIDATE_RATES:
-                rates_to_try = [default_rate] + CANDIDATE_RATES
-            else:
-                rates_to_try = CANDIDATE_RATES
+            default_idx = pa.get_default_input_device_info().get("index")
+            if default_idx is not None:
+                input_indices.append(int(default_idx))
         except Exception:
-            rates_to_try = CANDIDATE_RATES
-
-        for rate in rates_to_try:
+            pass
+        for i in range(pa.get_device_count()):
             try:
-                stream = pa.open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=rate,
-                    input=True,
-                    frames_per_buffer=1024,
-                )
-                stream.close()
-                return rate
+                info = pa.get_device_info_by_index(i)
+                if info.get("maxInputChannels", 0) > 0 and i not in input_indices:
+                    input_indices.append(i)
             except Exception:
                 continue
+
+        if not input_indices:
+            raise RuntimeError(
+                "No input devices found. Check ALSA/PulseAudio and microphone."
+            )
+
+        # For each device, prefer its default sample rate then candidate rates
+        for device_index in input_indices:
+            try:
+                dev = pa.get_device_info_by_index(device_index)
+                default_rate = int(dev.get("defaultSampleRate", 0))
+                if default_rate > 0 and default_rate not in CANDIDATE_RATES:
+                    rates_to_try = [default_rate] + CANDIDATE_RATES
+                else:
+                    rates_to_try = CANDIDATE_RATES
+            except Exception:
+                rates_to_try = CANDIDATE_RATES
+
+            for rate in rates_to_try:
+                try:
+                    stream = pa.open(
+                        format=pyaudio.paInt16,
+                        channels=1,
+                        rate=rate,
+                        input=True,
+                        input_device_index=device_index,
+                        frames_per_buffer=1024,
+                    )
+                    stream.close()
+                    return (device_index, rate)
+                except Exception:
+                    continue
+
         raise RuntimeError(
-            f"No supported input sample rate found (tried {rates_to_try}). "
-            "Check ALSA/PulseAudio and microphone."
+            "No supported input sample rate found on any device "
+            f"(tried rates {CANDIDATE_RATES}). Check ALSA/PulseAudio and microphone."
         )
     finally:
         try:
@@ -104,7 +132,7 @@ def _process_command_audio(audio_16k: array.array, on_play_messages):
         on_play_messages()
 
 
-def _open_stream_with_retry(pa, device_rate, chunk_size):
+def _open_stream_with_retry(pa, device_index, device_rate, chunk_size):
     """Open input stream with retries (handles mic hot-plug / ALSA re-enumeration)."""
     last_err = None
     for attempt in range(DEVICE_OPEN_RETRIES):
@@ -114,6 +142,7 @@ def _open_stream_with_retry(pa, device_rate, chunk_size):
                 channels=1,
                 rate=device_rate,
                 input=True,
+                input_device_index=device_index,
                 frames_per_buffer=chunk_size,
             )
             return stream
@@ -153,13 +182,13 @@ def run_listener(on_play_messages):
     porcupine_rate = porcupine.sample_rate
     frame_len = porcupine.frame_length
 
-    device_rate = _pick_input_rate()
+    device_index, device_rate = _pick_input_rate()
     chunk_size = max(1, int(frame_len * device_rate / porcupine_rate))
 
     pa = pyaudio.PyAudio()
     stream = None
     try:
-        stream = _open_stream_with_retry(pa, device_rate, chunk_size)
+        stream = _open_stream_with_retry(pa, device_index, device_rate, chunk_size)
         while True:
             try:
                 raw = stream.read(chunk_size, exception_on_overflow=False)
