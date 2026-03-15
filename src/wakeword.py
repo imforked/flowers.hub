@@ -14,7 +14,6 @@ import array
 import struct
 import logging
 import pvporcupine
-import pyaudio
 import speech_recognition as sr
 
 try:
@@ -45,7 +44,8 @@ def _pick_input_rate():
     Find a working (device_index, sample_rate). Tries default input first,
     then all other input devices. Raises RuntimeError if no working input.
     """
-    pa = pyaudio.PyAudio()
+    import pyaudio as _pyaudio
+    pa = _pyaudio.PyAudio()
     try:
         device_count = pa.get_device_count()
 
@@ -102,7 +102,7 @@ def _pick_input_rate():
             for rate in rates_to_try:
                 try:
                     stream = pa.open(
-                        format=pyaudio.paInt16,
+                        format=_pyaudio.paInt16,
                         channels=1,
                         rate=rate,
                         input=True,
@@ -244,11 +244,12 @@ def _run_listener_alsa(porcupine, frame_len, on_play_messages, card: str):
 
 def _open_stream_with_retry(pa, device_index, device_rate, chunk_size):
     """Open input stream with retries (handles mic hot-plug / ALSA re-enumeration)."""
+    import pyaudio as _pyaudio
     last_err = None
     for attempt in range(DEVICE_OPEN_RETRIES):
         try:
             stream = pa.open(
-                format=pyaudio.paInt16,
+                format=_pyaudio.paInt16,
                 channels=1,
                 rate=device_rate,
                 input=True,
@@ -292,20 +293,29 @@ def run_listener(on_play_messages):
     porcupine_rate = porcupine.sample_rate
     frame_len = porcupine.frame_length
 
-    # On Linux with pyalsaaudio, use ALSA directly so the USB mic works without fragile env/config
-    if sys.platform == "linux" and alsaaudio is not None:
+    # On Linux use ALSA (pyalsaaudio) only—PyAudio/PortAudio is unreliable with USB mics there
+    if sys.platform == "linux":
+        if alsaaudio is None:
+            raise RuntimeError(
+                "On Linux, install pyalsaaudio for microphone support: pip install pyalsaaudio"
+            )
         card = os.environ.get("AUDIO_INPUT_CARD", "").strip() or _pick_alsa_capture_card(frame_len)
-        if card is not None:
-            try:
-                _run_listener_alsa(porcupine, frame_len, on_play_messages, card)
-            finally:
-                porcupine.delete()
-            return
+        if card is None:
+            raise RuntimeError(
+                "No ALSA capture device found. Run 'arecord -l' to see cards; "
+                "if your USB mic is listed, ensure pyalsaaudio is installed and try again."
+            )
+        try:
+            _run_listener_alsa(porcupine, frame_len, on_play_messages, card)
+        finally:
+            porcupine.delete()
+        return
 
+    import pyaudio as _pyaudio
     device_index, device_rate = _pick_input_rate()
     chunk_size = max(1, int(frame_len * device_rate / porcupine_rate))
 
-    pa = pyaudio.PyAudio()
+    pa = _pyaudio.PyAudio()
     stream = None
     try:
         stream = _open_stream_with_retry(pa, device_index, device_rate, chunk_size)

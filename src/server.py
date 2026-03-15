@@ -141,14 +141,9 @@ def _start_wake_word_listener():
     except ValueError as e:
         app.logger.warning("Wake word not started: %s", e)
     except RuntimeError as e:
-        if "input" in str(e).lower() and ("sample rate" in str(e) or "device" in str(e)):
-            app.logger.warning(
-                "Wake word disabled: no working microphone. %s "
-                "On Raspberry Pi with a USB mic, set it as ALSA default: "
-                "add to ~/.asoundrc: defaults.pcm.card 1 and defaults.ctl.card 1 "
-                "(use the card number from 'arecord -l').",
-                e,
-            )
+        msg = str(e).lower()
+        if any(k in msg for k in ("input", "sample rate", "device", "alsa", "pyalsaaudio", "microphone")):
+            app.logger.warning("Wake word disabled: %s", e)
         else:
             app.logger.exception("Wake word listener error: %s", e)
     except Exception as e:
