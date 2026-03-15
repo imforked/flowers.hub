@@ -25,6 +25,9 @@ PORT = int(os.getenv("PI_PORT", "5000"))
 # Ensure folders exist
 ensure_dirs(STORAGE_ROOT)
 
+# Signalled when a new unheard message is saved; light controller waits on this to start breathing immediately
+_unheard_message_event = threading.Event()
+
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -112,6 +115,7 @@ def new_message():
         return jsonify({"error": "save failed"}), 500
 
     app.logger.info("Saved message %s -> %s", message_id, wav_path)
+    _unheard_message_event.set()  # Wake light controller so breathing starts right away
     return jsonify({"status": "saved", "id": message_id}), 201
 
 
@@ -132,6 +136,7 @@ def play_latest():
 
 
 def _start_wake_word_listener():
+    """Run wake word listener; 'flowers' then 'play messages' calls play_latest_message()."""
     try:
         from wakeword import run_listener
 
@@ -151,7 +156,7 @@ def _start_wake_word_listener():
 
 
 def _run_light_controller():
-    """Run breathing animation while unheard messages exist; lights off otherwise."""
+    """Run breathing_fade animation while unheard messages exist; lights off otherwise."""
     try:
         from breathing_fade import init_lights, lights_off, run_breathing_until
 
@@ -161,10 +166,11 @@ def _run_light_controller():
 
         while True:
             if has_unheard_messages():
+                _unheard_message_event.clear()
                 run_breathing_until(lambda: not has_unheard_messages())
             else:
-                lights_off()
-                time.sleep(2)
+                _unheard_message_event.clear()
+                _unheard_message_event.wait(timeout=2)  # Wake immediately when new message saved
 
     except Exception as e:
         app.logger.exception("Light controller error: %s", e)
