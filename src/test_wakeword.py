@@ -21,6 +21,9 @@ if str(_root) not in sys.path:
 from dotenv import load_dotenv
 load_dotenv(_root / ".env")
 
+import logging
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
+
 # Add src to path for imports when run from root
 _src = Path(__file__).resolve().parent
 if str(_src) not in sys.path:

@@ -149,10 +149,13 @@ def _process_command_audio(audio_16k: array.array, on_play_messages):
         ad = sr.AudioData(audio_16k.tobytes(), 16000, 2)
         text = recognizer.recognize_google(ad, language="en-US")
     except sr.UnknownValueError:
+        logger.debug("Command phrase: no speech recognized")
         return
-    except Exception:
+    except Exception as e:
+        logger.warning("Command phrase recognition failed: %s", e)
         return
     text = (text or "").strip().lower()
+    logger.info("Heard after wake word: %r", text or "(empty)")
     if "play messages" in text or "play message" in text:
         on_play_messages()
 
@@ -221,6 +224,7 @@ def _run_listener_alsa(porcupine, frame_len, on_play_messages, card: str):
                 frame = array.array("h", buf[:frame_len])
                 del buf[:frame_len]
                 if porcupine.process(frame.tolist()) >= 0:
+                    logger.info("Wake word 'flowers' detected — listening for command (%.1fs)", COMMAND_RECORD_SEC)
                     with _lock:
                         _record_until = time.time() + COMMAND_RECORD_SEC
 
@@ -241,6 +245,7 @@ def _run_listener_alsa(porcupine, frame_len, on_play_messages, card: str):
                 raw_arr = array.array("h")
                 for c in chunks:
                     raw_arr.extend(c)
+                logger.debug("Sending %.1fs of audio for command recognition", len(raw_arr) / 16000.0)
                 threading.Thread(
                     target=_process_command_audio,
                     args=(raw_arr, on_play_messages),
@@ -294,9 +299,11 @@ def run_listener(on_play_messages):
     if not access_key:
         raise ValueError("PICOVOICE_KEY environment variable is required for wake word.")
 
+    # Sensitivity 0.0–1.0; higher = more detections, more false positives. Default 0.5 is often too strict.
     porcupine = pvporcupine.create(
         access_key=access_key,
         keyword_paths=[KEYWORD_PATH],
+        sensitivities=[0.7],
     )
     porcupine_rate = porcupine.sample_rate
     frame_len = porcupine.frame_length
