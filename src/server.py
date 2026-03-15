@@ -161,7 +161,10 @@ def _run_light_controller():
         from breathing_fade import init_lights, lights_off, run_breathing_until
 
         if not init_lights():
-            app.logger.warning("Lights not started: RPi.GPIO not available")
+            app.logger.warning(
+                "Lights not started: RPi.GPIO not available. "
+                "On Raspberry Pi run: pip install RPi.GPIO"
+            )
             return
 
         while True:

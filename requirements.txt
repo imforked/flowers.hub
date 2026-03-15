@@ -6,3 +6,4 @@ pvporcupine
 PyAudio
 SpeechRecognition
 pyalsaaudio
+RPi.GPIO
