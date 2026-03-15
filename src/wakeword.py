@@ -3,14 +3,12 @@ Wake word detection with Picovoice Porcupine. Uses custom "flowers" wake word.
 After "flowers", listens for "play messages" and invokes the given callback.
 Uses only stdlib + PyAudio (no numpy). Optional: pyalsaaudio for ALSA-direct capture.
 
-Command phrase recognition: Vosk only (on-device). Place an unzipped Vosk model
-at voice-models/vosk-model-small-en-us-0.15/ or set VOSK_MODEL to its path.
-No cloud/network; all voice-to-text runs on the machine.
+Command phrase recognition: Picovoice Leopard (on-device). Same PICOVOICE_KEY as
+Porcupine. No separate model download; pip install pvleopard works on Raspberry Pi.
 
 SD-card safety: bounded command buffer, safe device open/close, and minimal
 writes to avoid corruption on power brownouts when USB mics are connected.
 """
-import json
 import os
 import sys
 import time
@@ -26,10 +24,10 @@ except ImportError:
     alsaaudio = None
 
 try:
-    from vosk import Model as VoskModel, KaldiRecognizer
-    _VOSK_AVAILABLE = True
+    import pvleopard
+    _LEOPARD_AVAILABLE = True
 except ImportError:
-    _VOSK_AVAILABLE = False
+    _LEOPARD_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -52,47 +50,49 @@ DEVICE_OPEN_RETRY_DELAY_SEC = 1.0
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYWORD_PATH = os.path.join(_SCRIPT_DIR, "voice-models", "flowers.ppn")
-# Default Vosk small English model dir (after unzipping). Override with VOSK_MODEL env.
-_VOSK_MODEL_DIR_DEFAULT = os.path.join(_SCRIPT_DIR, "voice-models", "vosk-model-small-en-us-0.15")
 
 _record_until = 0.0
-_vosk_model = None
-_vosk_model_lock = threading.Lock()
+_leopard = None
+_leopard_lock = threading.Lock()
 
 
-def _get_vosk_model():
-    """Lazy-load Vosk model once. Returns Model instance or None if not available."""
-    global _vosk_model
-    with _vosk_model_lock:
-        if _vosk_model is not None:
-            return _vosk_model
-        if not _VOSK_AVAILABLE:
+def _get_leopard():
+    """Lazy-load Leopard STT once. Returns Leopard instance or None if not available."""
+    global _leopard
+    with _leopard_lock:
+        if _leopard is not None:
+            return _leopard
+        if not _LEOPARD_AVAILABLE:
             return None
-        path = os.environ.get("VOSK_MODEL", "").strip() or _VOSK_MODEL_DIR_DEFAULT
-        if not path or not os.path.isdir(path):
+        access_key = os.environ.get("PICOVOICE_KEY", "").strip()
+        if not access_key:
             return None
         try:
-            _vosk_model = VoskModel(path)
-            logger.info("Vosk model loaded from %s", path)
-            return _vosk_model
+            _leopard = pvleopard.create(access_key=access_key)
+            logger.info("Leopard speech-to-text loaded")
+            return _leopard
         except Exception as e:
-            logger.warning("Vosk model load failed: %s", e)
+            logger.warning("Leopard load failed: %s", e)
             return None
 
 
-def _recognize_with_vosk(audio_16k: array.array):
+def _recognize_with_leopard(audio_16k: array.array):
     """Return recognized text or None. Audio must be 16 kHz mono int16."""
-    model = _get_vosk_model()
-    if model is None:
+    leopard = _get_leopard()
+    if leopard is None:
         return None
-    rec = KaldiRecognizer(model, 16000)
-    audio_bytes = audio_16k.tobytes()
-    # Feed in chunks (e.g. 4000 bytes) for compatibility; one chunk is fine for short commands
-    chunk = 4000
-    for i in range(0, len(audio_bytes), chunk):
-        rec.AcceptWaveform(audio_bytes[i : i + chunk])
-    result = json.loads(rec.FinalResult())
-    return (result.get("text") or "").strip().lower() or None
+    # Leopard.process() expects 16-bit PCM at leopard.sample_rate (usually 16000)
+    if leopard.sample_rate == 16000:
+        pcm = audio_16k.tolist()
+    else:
+        n_out = int(len(audio_16k) * leopard.sample_rate / 16000)
+        pcm = _resample_to_16k(audio_16k, n_out).tolist()
+    try:
+        transcript, _ = leopard.process(pcm)
+        return (transcript or "").strip().lower() or None
+    except Exception as e:
+        logger.debug("Leopard recognition failed: %s", e)
+        return None
 
 
 _record_until = 0.0
@@ -205,8 +205,8 @@ def _resample_to_16k(pcm: array.array, n_out: int) -> array.array:
 
 
 def _process_command_audio(audio_16k: array.array, on_play_messages):
-    # Vosk only (on-device); no cloud
-    text = _recognize_with_vosk(audio_16k)
+    # Leopard (on-device); same PICOVOICE_KEY as Porcupine
+    text = _recognize_with_leopard(audio_16k)
     if text is None:
         logger.debug("Command phrase: no speech recognized")
         return
