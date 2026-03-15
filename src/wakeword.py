@@ -3,9 +3,14 @@ Wake word detection with Picovoice Porcupine. Uses custom "flowers" wake word.
 After "flowers", listens for "play messages" and invokes the given callback.
 Uses only stdlib + PyAudio (no numpy). Optional: pyalsaaudio for ALSA-direct capture.
 
+Command phrase recognition: Vosk only (on-device). Place an unzipped Vosk model
+at voice-models/vosk-model-small-en-us-0.15/ or set VOSK_MODEL to its path.
+No cloud/network; all voice-to-text runs on the machine.
+
 SD-card safety: bounded command buffer, safe device open/close, and minimal
 writes to avoid corruption on power brownouts when USB mics are connected.
 """
+import json
 import os
 import sys
 import time
@@ -14,12 +19,17 @@ import array
 import struct
 import logging
 import pvporcupine
-import speech_recognition as sr
 
 try:
     import alsaaudio
 except ImportError:
     alsaaudio = None
+
+try:
+    from vosk import Model as VoskModel, KaldiRecognizer
+    _VOSK_AVAILABLE = True
+except ImportError:
+    _VOSK_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +52,48 @@ DEVICE_OPEN_RETRY_DELAY_SEC = 1.0
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYWORD_PATH = os.path.join(_SCRIPT_DIR, "voice-models", "flowers.ppn")
+# Default Vosk small English model dir (after unzipping). Override with VOSK_MODEL env.
+_VOSK_MODEL_DIR_DEFAULT = os.path.join(_SCRIPT_DIR, "voice-models", "vosk-model-small-en-us-0.15")
+
+_record_until = 0.0
+_vosk_model = None
+_vosk_model_lock = threading.Lock()
+
+
+def _get_vosk_model():
+    """Lazy-load Vosk model once. Returns Model instance or None if not available."""
+    global _vosk_model
+    with _vosk_model_lock:
+        if _vosk_model is not None:
+            return _vosk_model
+        if not _VOSK_AVAILABLE:
+            return None
+        path = os.environ.get("VOSK_MODEL", "").strip() or _VOSK_MODEL_DIR_DEFAULT
+        if not path or not os.path.isdir(path):
+            return None
+        try:
+            _vosk_model = VoskModel(path)
+            logger.info("Vosk model loaded from %s", path)
+            return _vosk_model
+        except Exception as e:
+            logger.warning("Vosk model load failed: %s", e)
+            return None
+
+
+def _recognize_with_vosk(audio_16k: array.array):
+    """Return recognized text or None. Audio must be 16 kHz mono int16."""
+    model = _get_vosk_model()
+    if model is None:
+        return None
+    rec = KaldiRecognizer(model, 16000)
+    audio_bytes = audio_16k.tobytes()
+    # Feed in chunks (e.g. 4000 bytes) for compatibility; one chunk is fine for short commands
+    chunk = 4000
+    for i in range(0, len(audio_bytes), chunk):
+        rec.AcceptWaveform(audio_bytes[i : i + chunk])
+    result = json.loads(rec.FinalResult())
+    return (result.get("text") or "").strip().lower() or None
+
 
 _record_until = 0.0
 _command_buffer = []
@@ -153,25 +205,12 @@ def _resample_to_16k(pcm: array.array, n_out: int) -> array.array:
 
 
 def _process_command_audio(audio_16k: array.array, on_play_messages):
-    try:
-        recognizer = sr.Recognizer()
-        ad = sr.AudioData(audio_16k.tobytes(), 16000, 2)
-        text = recognizer.recognize_google(ad, language="en-US")
-    except sr.UnknownValueError:
+    # Vosk only (on-device); no cloud
+    text = _recognize_with_vosk(audio_16k)
+    if text is None:
         logger.debug("Command phrase: no speech recognized")
         return
-    except Exception as e:
-        err = str(e)
-        if "FLAC" in err or "flac" in err:
-            logger.warning(
-                "Command phrase recognition failed: FLAC not installed. "
-                "On Raspberry Pi run: sudo apt-get install flac"
-            )
-        else:
-            logger.warning("Command phrase recognition failed: %s", e)
-        return
-    text = (text or "").strip().lower()
-    logger.info("Heard after wake word: %r", text or "(empty)")
+    logger.info("Heard after wake word: %r", text)
     if "play messages" in text or "play message" in text:
         on_play_messages()
 
