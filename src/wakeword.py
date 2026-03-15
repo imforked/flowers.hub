@@ -157,14 +157,22 @@ def _process_command_audio(audio_16k: array.array, on_play_messages):
         on_play_messages()
 
 
-def _pick_alsa_capture_card(frame_len: int, max_cards: int = 5):
+def _pick_alsa_capture_card(frame_len: int):
     """
     Try opening ALSA plughw:N,0 for capture at 16 kHz. Return first card index that works, or None.
-    Tries card 1, 2, ... first (typical USB mics), then card 0 (built-in).
+    Only tries cards 0 and 1 (Pi built-in + typical USB mic). Set AUDIO_INPUT_CARD for other cards.
     """
     if alsaaudio is None:
         return None
-    cards_to_try = list(range(1, max_cards)) + [0]  # prefer 1,2,... then 0
+    forced = os.environ.get("AUDIO_INPUT_CARD", "").strip()
+    try:
+        forced_int = int(forced) if forced else None
+    except ValueError:
+        forced_int = None
+    if forced_int is not None:
+        cards_to_try = [str(forced_int), "1", "0"]
+    else:
+        cards_to_try = ["1", "0"]  # USB mic first, then built-in; avoid probing 2,3,4 (ALSA spam)
     for card in cards_to_try:
         try:
             pcm = alsaaudio.PCM(
@@ -177,7 +185,7 @@ def _pick_alsa_capture_card(frame_len: int, max_cards: int = 5):
             )
             if hasattr(pcm, "close"):
                 pcm.close()
-            return str(card)
+            return card
         except Exception:
             continue
     return None

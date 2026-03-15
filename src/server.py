@@ -181,8 +181,10 @@ if __name__ == "__main__":
         daemon=True,
     ).start()
 
+    # use_reloader=False: reloader forks a child that can't open the ALSA mic (device busy or wrong card)
     app.run(
         host="0.0.0.0",
         port=PORT,
         debug=True,
+        use_reloader=False,
     )
