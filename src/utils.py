@@ -1,6 +1,7 @@
 import os
 import json
 import subprocess
+import tempfile
 
 def ensure_dirs(storage_root: str):
     """
@@ -16,7 +17,7 @@ def _atomic_write(path: str, data, binary: bool = True) -> None:
     on power loss (e.g. when USB mic causes brownout). Uses temp file + rename.
     """
     dirpath = os.path.dirname(path)
-    fd, tmp_path = os.path.mkstemp(dir=dirpath, prefix=".tmp.", suffix=".tmp")
+    fd, tmp_path = tempfile.mkstemp(dir=dirpath)
     try:
         with os.fdopen(fd, "wb" if binary else "w", encoding=None if binary else "utf-8") as f:
             f.write(data)
