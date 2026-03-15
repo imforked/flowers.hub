@@ -2,18 +2,29 @@
 Wake word detection with Picovoice Porcupine. Uses custom "flowers" wake word.
 After "flowers", listens for "play messages" and invokes the given callback.
 Uses only stdlib + PyAudio (no numpy).
+
+SD-card safety: bounded command buffer, safe device open/close, and minimal
+writes to avoid corruption on power brownouts when USB mics are connected.
 """
 import os
 import time
 import threading
 import array
 import struct
+import logging
 import pvporcupine
 import pyaudio
 import speech_recognition as sr
 
+logger = logging.getLogger(__name__)
+
 CANDIDATE_RATES = [16000, 8000, 48000, 44100, 22050, 11025, 96000, 88200]
 COMMAND_RECORD_SEC = 3.0
+# Cap buffer to avoid unbounded memory growth (OOM/swap thrashing can corrupt SD)
+COMMAND_BUFFER_MAX_CHUNKS = 512
+# Retries when opening device (e.g. mic just plugged in / ALSA re-enumerating)
+DEVICE_OPEN_RETRIES = 5
+DEVICE_OPEN_RETRY_DELAY_SEC = 1.0
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYWORD_PATH = os.path.join(_SCRIPT_DIR, "voice-models", "flowers.ppn")
@@ -55,7 +66,10 @@ def _pick_input_rate():
             "Check ALSA/PulseAudio and microphone."
         )
     finally:
-        pa.terminate()
+        try:
+            pa.terminate()
+        except Exception:
+            pass
 
 
 def _resample_to_16k(pcm: array.array, n_out: int) -> array.array:
@@ -90,6 +104,33 @@ def _process_command_audio(audio_16k: array.array, on_play_messages):
         on_play_messages()
 
 
+def _open_stream_with_retry(pa, device_rate, chunk_size):
+    """Open input stream with retries (handles mic hot-plug / ALSA re-enumeration)."""
+    last_err = None
+    for attempt in range(DEVICE_OPEN_RETRIES):
+        try:
+            stream = pa.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=device_rate,
+                input=True,
+                frames_per_buffer=chunk_size,
+            )
+            return stream
+        except Exception as e:
+            last_err = e
+            if attempt < DEVICE_OPEN_RETRIES - 1:
+                logger.warning(
+                    "Audio device open failed (attempt %s/%s), retrying in %.1fs: %s",
+                    attempt + 1, DEVICE_OPEN_RETRIES, DEVICE_OPEN_RETRY_DELAY_SEC, e,
+                )
+                time.sleep(DEVICE_OPEN_RETRY_DELAY_SEC)
+    raise RuntimeError(
+        f"Could not open microphone after {DEVICE_OPEN_RETRIES} attempts. "
+        "If you just plugged in the mic, wait a few seconds and try again."
+    ) from last_err
+
+
 def run_listener(on_play_messages):
     """
     Run the wake word listener in the current thread. Blocks until the process exits.
@@ -116,17 +157,15 @@ def run_listener(on_play_messages):
     chunk_size = max(1, int(frame_len * device_rate / porcupine_rate))
 
     pa = pyaudio.PyAudio()
-    stream = pa.open(
-        format=pyaudio.paInt16,
-        channels=1,
-        rate=device_rate,
-        input=True,
-        frames_per_buffer=chunk_size,
-    )
-
+    stream = None
     try:
+        stream = _open_stream_with_retry(pa, device_rate, chunk_size)
         while True:
-            raw = stream.read(chunk_size, exception_on_overflow=False)
+            try:
+                raw = stream.read(chunk_size, exception_on_overflow=False)
+            except Exception as e:
+                logger.warning("Stream read error (device may have been unplugged): %s", e)
+                break
             pcm = array.array("h")
             pcm.frombytes(raw)
             pcm_16k = _resample_to_16k(pcm, frame_len)
@@ -136,7 +175,8 @@ def run_listener(on_play_messages):
 
             with _lock:
                 if _record_until > 0 and time.time() < _record_until:
-                    _command_buffer.append(array.array("h", pcm))
+                    if len(_command_buffer) < COMMAND_BUFFER_MAX_CHUNKS:
+                        _command_buffer.append(array.array("h", pcm))
                     continue
                 if _record_until > 0 and time.time() >= _record_until and _command_buffer:
                     chunks = list(_command_buffer)
@@ -157,8 +197,21 @@ def run_listener(on_play_messages):
                 args=(audio_16k, on_play_messages),
                 daemon=True,
             ).start()
+    except KeyboardInterrupt:
+        logger.info("Wake word listener interrupted")
     finally:
-        stream.stop_stream()
-        stream.close()
-        pa.terminate()
+        if stream is not None:
+            try:
+                stream.stop_stream()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+        try:
+            pa.terminate()
+        except Exception:
+            pass
+        porcupine.delete()
 
