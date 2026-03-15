@@ -24,7 +24,16 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 CANDIDATE_RATES = [16000, 8000, 48000, 44100, 22050, 11025, 96000, 88200]
-COMMAND_RECORD_SEC = 3.0
+# Seconds to record after "flowers" before sending to speech recognition. Shorter = faster response.
+_COMMAND_RECORD_SEC_DEFAULT = 2.0
+
+
+def _command_record_sec():
+    try:
+        v = os.environ.get("COMMAND_RECORD_SEC", "")
+        return float(v) if v else _COMMAND_RECORD_SEC_DEFAULT
+    except (TypeError, ValueError):
+        return _COMMAND_RECORD_SEC_DEFAULT
 # Cap buffer to avoid unbounded memory growth (OOM/swap thrashing can corrupt SD)
 COMMAND_BUFFER_MAX_CHUNKS = 512
 # Retries when opening device (e.g. mic just plugged in / ALSA re-enumerating)
@@ -231,9 +240,10 @@ def _run_listener_alsa(porcupine, frame_len, on_play_messages, card: str):
                 frame = array.array("h", buf[:frame_len])
                 del buf[:frame_len]
                 if porcupine.process(frame.tolist()) >= 0:
-                    logger.info("Wake word 'flowers' detected — listening for command (%.1fs)", COMMAND_RECORD_SEC)
+                    sec = _command_record_sec()
+                    logger.info("Wake word 'flowers' detected — listening for command (%.1fs)", sec)
                     with _lock:
-                        _record_until = time.time() + COMMAND_RECORD_SEC
+                        _record_until = time.time() + sec
 
                 with _lock:
                     if _record_until > 0 and time.time() < _record_until:
@@ -352,7 +362,7 @@ def run_listener(on_play_messages):
             pcm_16k = _resample_to_16k(pcm, frame_len)
             if porcupine.process(pcm_16k.tolist()) >= 0:
                 with _lock:
-                    _record_until = time.time() + COMMAND_RECORD_SEC
+                    _record_until = time.time() + _command_record_sec()
 
             with _lock:
                 if _record_until > 0 and time.time() < _record_until:
