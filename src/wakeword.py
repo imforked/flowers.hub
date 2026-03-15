@@ -41,15 +41,27 @@ def _pick_input_rate():
     """
     pa = pyaudio.PyAudio()
     try:
-        # Build list of input device indices: default first, then rest
+        device_count = pa.get_device_count()
+
+        # Optional: force a device index (e.g. AUDIO_INPUT_DEVICE=1 for USB mic on card 1)
+        forced = os.environ.get("AUDIO_INPUT_DEVICE", "").strip()
+        try:
+            forced_idx = int(forced) if forced else None
+        except ValueError:
+            forced_idx = None
+        if forced_idx is not None and (forced_idx < 0 or forced_idx >= device_count):
+            forced_idx = None
+
+        # Build list of input device indices: forced first if set, then default, then rest
         input_indices = []
+        if forced_idx is not None:
+            input_indices.append(forced_idx)
         try:
             default_idx = pa.get_default_input_device_info().get("index")
-            if default_idx is not None:
+            if default_idx is not None and int(default_idx) not in input_indices:
                 input_indices.append(int(default_idx))
         except Exception:
             pass
-        device_count = pa.get_device_count()
         for i in range(device_count):
             try:
                 info = pa.get_device_info_by_index(i)
