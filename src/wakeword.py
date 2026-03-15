@@ -49,13 +49,20 @@ def _pick_input_rate():
                 input_indices.append(int(default_idx))
         except Exception:
             pass
-        for i in range(pa.get_device_count()):
+        device_count = pa.get_device_count()
+        for i in range(device_count):
             try:
                 info = pa.get_device_info_by_index(i)
                 if info.get("maxInputChannels", 0) > 0 and i not in input_indices:
                     input_indices.append(i)
             except Exception:
                 continue
+
+        # Some ALSA setups report 0 input channels for all devices; try first few indices anyway (e.g. USB mic on hub)
+        if not input_indices and device_count > 0:
+            for i in range(min(3, device_count)):
+                if i not in input_indices:
+                    input_indices.append(i)
 
         if not input_indices:
             raise RuntimeError(
