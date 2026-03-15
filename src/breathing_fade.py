@@ -62,6 +62,28 @@ def lights_off():
         pwm.ChangeDutyCycle(0)
 
 
+def cleanup_lights():
+    """
+    Turn off all lights, stop PWM, and release GPIO. Safe to call on process exit
+    (e.g. from atexit). Idempotent; safe to call even if lights were never initialized.
+    """
+    global _pwms
+    if not _GPIO_AVAILABLE:
+        return
+    if _pwms is not None:
+        for pwm in _pwms:
+            try:
+                pwm.ChangeDutyCycle(0)
+                pwm.stop()
+            except Exception:
+                pass
+        _pwms = None
+        try:
+            GPIO.cleanup()
+        except Exception:
+            pass
+
+
 def run_breathing_until(stop_check):
     """
     Run the breathing animation until stop_check() returns True.

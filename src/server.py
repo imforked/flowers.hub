@@ -6,7 +6,9 @@ _src_dir = Path(__file__).resolve().parent
 if str(_src_dir) not in sys.path:
     sys.path.insert(0, str(_src_dir))
 
+import atexit
 import os
+import signal
 import base64
 import logging
 import threading
@@ -179,7 +181,28 @@ def _run_light_controller():
         app.logger.exception("Light controller error: %s", e)
 
 
+def _cleanup_lights_on_exit():
+    try:
+        from breathing_fade import cleanup_lights
+        cleanup_lights()
+    except Exception:
+        pass
+
+
+def _signal_exit(signum, frame):
+    _cleanup_lights_on_exit()
+    signal.signal(signum, signal.SIG_DFL)
+    raise SystemExit(0)
+
+
 if __name__ == "__main__":
+    atexit.register(_cleanup_lights_on_exit)
+    signal.signal(signal.SIGINT, _signal_exit)
+    try:
+        signal.signal(signal.SIGTERM, _signal_exit)
+    except (ValueError, OSError):
+        pass  # SIGTERM not available on all platforms
+
     threading.Thread(
         target=_start_wake_word_listener,
         daemon=True,
