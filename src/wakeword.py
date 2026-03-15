@@ -152,7 +152,14 @@ def _process_command_audio(audio_16k: array.array, on_play_messages):
         logger.debug("Command phrase: no speech recognized")
         return
     except Exception as e:
-        logger.warning("Command phrase recognition failed: %s", e)
+        err = str(e)
+        if "FLAC" in err or "flac" in err:
+            logger.warning(
+                "Command phrase recognition failed: FLAC not installed. "
+                "On Raspberry Pi run: sudo apt-get install flac"
+            )
+        else:
+            logger.warning("Command phrase recognition failed: %s", e)
         return
     text = (text or "").strip().lower()
     logger.info("Heard after wake word: %r", text or "(empty)")
