@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 CANDIDATE_RATES = [16000, 8000, 48000, 44100, 22050, 11025, 96000, 88200]
 # Seconds to record after "flowers" before sending to speech recognition. Shorter = faster response.
-_COMMAND_RECORD_SEC_DEFAULT = 2.0
+_COMMAND_RECORD_SEC_DEFAULT = 1.2
 
 
 def _command_record_sec():
@@ -48,6 +48,7 @@ DEVICE_OPEN_RETRY_DELAY_SEC = 1.0
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYWORD_PATH = os.path.join(_SCRIPT_DIR, "voice-models", "flowers.ppn")
+COMMAND_KEYPHRASES_FILE = os.path.join(_SCRIPT_DIR, "voice-models", "command-keyphrases.txt")
 
 _record_until = 0.0
 _sphinx_decoder = None
@@ -55,7 +56,7 @@ _sphinx_lock = threading.Lock()
 
 
 def _get_sphinx_decoder():
-    """Lazy-create PocketSphinx Decoder once (default US English, 16 kHz)."""
+    """Lazy-create PocketSphinx Decoder in keyphrase mode (much faster than full LM on Pi)."""
     global _sphinx_decoder
     with _sphinx_lock:
         if _sphinx_decoder is not None:
@@ -63,8 +64,11 @@ def _get_sphinx_decoder():
         if Decoder is None:
             return None
         try:
-            _sphinx_decoder = Decoder(samprate=16000)
-            logger.info("PocketSphinx decoder loaded")
+            if os.path.isfile(COMMAND_KEYPHRASES_FILE):
+                _sphinx_decoder = Decoder(samprate=16000, kws=COMMAND_KEYPHRASES_FILE, lm=None)
+            else:
+                _sphinx_decoder = Decoder(samprate=16000, keyphrase="play messages", lm=None)
+            logger.info("PocketSphinx keyphrase decoder loaded")
             return _sphinx_decoder
         except Exception as e:
             logger.warning("PocketSphinx decoder failed: %s", e)
