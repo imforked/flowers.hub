@@ -1,9 +1,8 @@
 """
-Wake word detection with Picovoice Porcupine. Uses custom "flowers" wake word.
-After "flowers", listens for "play messages" and invokes the given callback.
-Uses only stdlib + PyAudio (no numpy). Optional: pyalsaaudio for ALSA-direct capture.
+Wake word and command phrase detection with PocketSphinx (on-device, offline).
 
-Command phrase recognition: PocketSphinx (on-device, offline). No internet required.
+Flow: hear wake phrase "flowers", then within COMMAND_RECORD_SEC hear "play messages"
+and invoke the callback. Uses ALSA on Linux (pyalsaaudio); PyAudio elsewhere.
 
 SD-card safety: bounded command buffer, safe device open/close, and minimal
 writes to avoid corruption on power brownouts when USB mics are connected.
@@ -13,9 +12,7 @@ import sys
 import time
 import threading
 import array
-import struct
 import logging
-import pvporcupine
 
 try:
     from pocketsphinx import Decoder
@@ -30,8 +27,12 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 CANDIDATE_RATES = [16000, 8000, 48000, 44100, 22050, 11025, 96000, 88200]
-# Seconds to record after "flowers" before sending to speech recognition. Shorter = faster response.
 _COMMAND_RECORD_SEC_DEFAULT = 1.2
+# ALSA / wake: fixed chunk size at 16 kHz (matches PocketSphinx expectation)
+CHUNK_SAMPLES_16K = 1024
+
+# Ignore duplicate wake fires within this window (seconds)
+_WAKE_COOLDOWN_SEC_DEFAULT = 1.5
 
 
 def _command_record_sec():
@@ -40,44 +41,124 @@ def _command_record_sec():
         return float(v) if v else _COMMAND_RECORD_SEC_DEFAULT
     except (TypeError, ValueError):
         return _COMMAND_RECORD_SEC_DEFAULT
-# Cap buffer to avoid unbounded memory growth (OOM/swap thrashing can corrupt SD)
+
+
+def _wake_cooldown_sec():
+    try:
+        v = os.environ.get("WAKE_COOLDOWN_SEC", "")
+        return float(v) if v else _WAKE_COOLDOWN_SEC_DEFAULT
+    except (TypeError, ValueError):
+        return _WAKE_COOLDOWN_SEC_DEFAULT
+
+
 COMMAND_BUFFER_MAX_CHUNKS = 512
-# Retries when opening device (e.g. mic just plugged in / ALSA re-enumerating)
 DEVICE_OPEN_RETRIES = 5
 DEVICE_OPEN_RETRY_DELAY_SEC = 1.0
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-KEYWORD_PATH = os.path.join(_SCRIPT_DIR, "voice-models", "flowers.ppn")
+WAKE_KEYPHRASES_FILE = os.path.join(_SCRIPT_DIR, "voice-models", "wake-keyphrases.txt")
 COMMAND_KEYPHRASES_FILE = os.path.join(_SCRIPT_DIR, "voice-models", "command-keyphrases.txt")
 
 _record_until = 0.0
-_sphinx_decoder = None
+_command_buffer = []
+_lock = threading.Lock()
+
+_command_decoder = None
+_wake_decoder = None
 _sphinx_lock = threading.Lock()
+_last_wake_ts = 0.0
 
 
-def _get_sphinx_decoder():
-    """Lazy-create PocketSphinx Decoder in keyphrase mode (much faster than full LM on Pi)."""
-    global _sphinx_decoder
+def _get_wake_decoder():
+    """Keyword spotting for the wake phrase only (separate from command decoder)."""
+    global _wake_decoder
     with _sphinx_lock:
-        if _sphinx_decoder is not None:
-            return _sphinx_decoder
+        if _wake_decoder is not None:
+            return _wake_decoder
+        if Decoder is None:
+            return None
+        try:
+            if os.path.isfile(WAKE_KEYPHRASES_FILE):
+                _wake_decoder = Decoder(samprate=16000, kws=WAKE_KEYPHRASES_FILE, lm=None)
+            else:
+                _wake_decoder = Decoder(samprate=16000, keyphrase="flowers", lm=None)
+            logger.info("PocketSphinx wake decoder loaded")
+            return _wake_decoder
+        except Exception as e:
+            logger.warning("PocketSphinx wake decoder failed: %s", e)
+            return None
+
+
+def _get_command_decoder():
+    """Keyphrase recognition for 'play messages' after wake."""
+    global _command_decoder
+    with _sphinx_lock:
+        if _command_decoder is not None:
+            return _command_decoder
         if Decoder is None:
             return None
         try:
             if os.path.isfile(COMMAND_KEYPHRASES_FILE):
-                _sphinx_decoder = Decoder(samprate=16000, kws=COMMAND_KEYPHRASES_FILE, lm=None)
+                _command_decoder = Decoder(samprate=16000, kws=COMMAND_KEYPHRASES_FILE, lm=None)
             else:
-                _sphinx_decoder = Decoder(samprate=16000, keyphrase="play messages", lm=None)
-            logger.info("PocketSphinx keyphrase decoder loaded")
-            return _sphinx_decoder
+                _command_decoder = Decoder(samprate=16000, keyphrase="play messages", lm=None)
+            logger.info("PocketSphinx command decoder loaded")
+            return _command_decoder
         except Exception as e:
-            logger.warning("PocketSphinx decoder failed: %s", e)
+            logger.warning("PocketSphinx command decoder failed: %s", e)
             return None
 
 
+def _reset_wake_stream():
+    """Clear wake decoder state after a command window or startup."""
+    wd = _get_wake_decoder()
+    if wd is None:
+        return
+    with _sphinx_lock:
+        try:
+            wd.end_utt()
+        except Exception:
+            pass
+        try:
+            wd.start_utt()
+        except Exception:
+            pass
+
+
+def _feed_wake_and_detect(pcm_s16le_16k: bytes) -> bool:
+    """
+    Feed one chunk of 16 kHz mono s16le PCM. Return True if wake phrase detected.
+    """
+    global _last_wake_ts
+    wd = _get_wake_decoder()
+    if wd is None or not pcm_s16le_16k:
+        return False
+    with _sphinx_lock:
+        wd.process_raw(pcm_s16le_16k, False, False)
+        hyp = wd.hyp()
+        if hyp is None:
+            return False
+        text = (hyp.hypstr or "").strip().lower()
+        if "flowers" not in text:
+            return False
+        if time.time() - _last_wake_ts < _wake_cooldown_sec():
+            try:
+                wd.end_utt()
+                wd.start_utt()
+            except Exception:
+                pass
+            return False
+        _last_wake_ts = time.time()
+        try:
+            wd.end_utt()
+            wd.start_utt()
+        except Exception:
+            pass
+        return True
+
+
 def _recognize_command(audio_16k: array.array):
-    """Recognize command phrase from 16 kHz mono int16 audio. Uses PocketSphinx (offline)."""
-    decoder = _get_sphinx_decoder()
+    decoder = _get_command_decoder()
     if decoder is None:
         return None
     with _sphinx_lock:
@@ -93,22 +174,22 @@ def _recognize_command(audio_16k: array.array):
             return None
 
 
-_record_until = 0.0
-_command_buffer = []
-_lock = threading.Lock()
+def _process_command_audio(audio_16k: array.array, on_play_messages):
+    text = _recognize_command(audio_16k)
+    if text is None:
+        logger.debug("Command phrase: no speech recognized")
+        return
+    logger.info("Heard after wake word: %r", text)
+    if "play messages" in text or "play message" in text:
+        on_play_messages()
 
 
 def _pick_input_rate():
-    """
-    Find a working (device_index, sample_rate). Tries default input first,
-    then all other input devices. Raises RuntimeError if no working input.
-    """
     import pyaudio as _pyaudio
     pa = _pyaudio.PyAudio()
     try:
         device_count = pa.get_device_count()
 
-        # Optional: force a device index (e.g. AUDIO_INPUT_DEVICE=1 for USB mic on card 1)
         forced = os.environ.get("AUDIO_INPUT_DEVICE", "").strip()
         try:
             forced_idx = int(forced) if forced else None
@@ -117,7 +198,6 @@ def _pick_input_rate():
         if forced_idx is not None and (forced_idx < 0 or forced_idx >= device_count):
             forced_idx = None
 
-        # Build list of input device indices: forced first if set, then default, then rest
         input_indices = []
         if forced_idx is not None:
             input_indices.append(forced_idx)
@@ -135,7 +215,6 @@ def _pick_input_rate():
             except Exception:
                 continue
 
-        # Some ALSA setups report 0 input channels for all devices; try first few indices anyway (e.g. USB mic on hub)
         if not input_indices and device_count > 0:
             for i in range(min(3, device_count)):
                 if i not in input_indices:
@@ -146,7 +225,6 @@ def _pick_input_rate():
                 "No input devices found. Check ALSA/PulseAudio and microphone."
             )
 
-        # For each device, prefer its default sample rate then candidate rates
         for device_index in input_indices:
             try:
                 dev = pa.get_device_info_by_index(device_index)
@@ -187,6 +265,8 @@ def _pick_input_rate():
 def _resample_to_16k(pcm: array.array, n_out: int) -> array.array:
     """Linear interpolation resample to n_out int16 samples."""
     n_in = len(pcm)
+    if n_in == 0:
+        return array.array("h")
     if n_in == n_out:
         return array.array("h", pcm)
     out = array.array("h")
@@ -202,21 +282,14 @@ def _resample_to_16k(pcm: array.array, n_out: int) -> array.array:
     return out
 
 
-def _process_command_audio(audio_16k: array.array, on_play_messages):
-    text = _recognize_command(audio_16k)
-    if text is None:
-        logger.debug("Command phrase: no speech recognized")
-        return
-    logger.info("Heard after wake word: %r", text)
-    if "play messages" in text or "play message" in text:
-        on_play_messages()
+def _pcm_resample_to_16k(pcm: array.array, sample_rate: int) -> array.array:
+    if sample_rate == 16000:
+        return array.array("h", pcm)
+    n_out = max(1, int(len(pcm) * 16000 / sample_rate))
+    return _resample_to_16k(pcm, n_out)
 
 
-def _pick_alsa_capture_card(frame_len: int):
-    """
-    Try opening ALSA plughw:N,0 for capture at 16 kHz. Return first card index that works, or None.
-    Only tries cards 0 and 1 (Pi built-in + typical USB mic). Set AUDIO_INPUT_CARD for other cards.
-    """
+def _pick_alsa_capture_card(periodsize: int):
     if alsaaudio is None:
         return None
     forced = os.environ.get("AUDIO_INPUT_CARD", "").strip()
@@ -227,7 +300,7 @@ def _pick_alsa_capture_card(frame_len: int):
     if forced_int is not None:
         cards_to_try = [str(forced_int), "1", "0"]
     else:
-        cards_to_try = ["1", "0"]  # USB mic first, then built-in; avoid probing 2,3,4 (ALSA spam)
+        cards_to_try = ["1", "0"]
     for card in cards_to_try:
         try:
             pcm = alsaaudio.PCM(
@@ -236,7 +309,7 @@ def _pick_alsa_capture_card(frame_len: int):
                 rate=16000,
                 channels=1,
                 format=alsaaudio.PCM_FORMAT_S16_LE,
-                periodsize=frame_len,
+                periodsize=periodsize,
             )
             if hasattr(pcm, "close"):
                 pcm.close()
@@ -246,24 +319,21 @@ def _pick_alsa_capture_card(frame_len: int):
     return None
 
 
-def _run_listener_alsa(porcupine, frame_len, on_play_messages, card: str):
-    """
-    Run the listener using ALSA directly (plughw:CARD,0). Bypasses PyAudio for reliable USB mic use.
-    """
+def _run_listener_alsa(on_play_messages, card: str):
     global _record_until, _command_buffer
     device = f"plughw:{card},0"
-    # 16 kHz mono so no resampling; plughw does rate conversion if the hardware rate differs
     pcm = alsaaudio.PCM(
         alsaaudio.PCM_CAPTURE,
         device=device,
         rate=16000,
         channels=1,
         format=alsaaudio.PCM_FORMAT_S16_LE,
-        periodsize=frame_len,
+        periodsize=CHUNK_SAMPLES_16K,
     )
     logger.info("Wake word listener using ALSA %s (16 kHz mono)", device)
 
     buf = array.array("h")
+    _reset_wake_stream()
     try:
         while True:
             length, data = pcm.read()
@@ -272,33 +342,46 @@ def _run_listener_alsa(porcupine, frame_len, on_play_messages, card: str):
             pcm_chunk = array.array("h")
             pcm_chunk.frombytes(data)
             buf.extend(pcm_chunk)
-            while len(buf) >= frame_len:
-                frame = array.array("h", buf[:frame_len])
-                del buf[:frame_len]
-                if porcupine.process(frame.tolist()) >= 0:
+            while len(buf) >= CHUNK_SAMPLES_16K:
+                frame = array.array("h", buf[:CHUNK_SAMPLES_16K])
+                del buf[:CHUNK_SAMPLES_16K]
+                frame_bytes = frame.tobytes()
+
+                now = time.time()
+                recording_cmd = _record_until > 0 and now < _record_until
+                if not recording_cmd and _feed_wake_and_detect(frame_bytes):
                     sec = _command_record_sec()
-                    logger.info("Wake word 'flowers' detected — listening for command (%.1fs)", sec)
+                    logger.info(
+                        "Wake word 'flowers' detected — listening for command (%.1fs)",
+                        sec,
+                    )
                     with _lock:
                         _record_until = time.time() + sec
 
                 with _lock:
-                    if _record_until > 0 and time.time() < _record_until:
+                    now = time.time()
+                    if _record_until > 0 and now < _record_until:
                         if len(_command_buffer) < COMMAND_BUFFER_MAX_CHUNKS:
                             _command_buffer.append(array.array("h", frame))
                         continue
-                    if _record_until > 0 and time.time() >= _record_until and _command_buffer:
+                    if _record_until > 0 and now >= _record_until and _command_buffer:
                         chunks = list(_command_buffer)
                         _command_buffer.clear()
                         _record_until = 0.0
                     else:
-                        if _record_until > 0 and time.time() >= _record_until:
+                        if _record_until > 0 and now >= _record_until:
                             _record_until = 0.0
+                            _reset_wake_stream()
                         continue
 
                 raw_arr = array.array("h")
                 for c in chunks:
                     raw_arr.extend(c)
-                logger.debug("Sending %.1fs of audio for command recognition", len(raw_arr) / 16000.0)
+                logger.debug(
+                    "Sending %.1fs of audio for command recognition",
+                    len(raw_arr) / 16000.0,
+                )
+                _reset_wake_stream()
                 threading.Thread(
                     target=_process_command_audio,
                     args=(raw_arr, on_play_messages),
@@ -309,7 +392,6 @@ def _run_listener_alsa(porcupine, frame_len, on_play_messages, card: str):
 
 
 def _open_stream_with_retry(pa, device_index, device_rate, chunk_size):
-    """Open input stream with retries (handles mic hot-plug / ALSA re-enumeration)."""
     import pyaudio as _pyaudio
     last_err = None
     for attempt in range(DEVICE_OPEN_RETRIES):
@@ -328,7 +410,10 @@ def _open_stream_with_retry(pa, device_index, device_rate, chunk_size):
             if attempt < DEVICE_OPEN_RETRIES - 1:
                 logger.warning(
                     "Audio device open failed (attempt %s/%s), retrying in %.1fs: %s",
-                    attempt + 1, DEVICE_OPEN_RETRIES, DEVICE_OPEN_RETRY_DELAY_SEC, e,
+                    attempt + 1,
+                    DEVICE_OPEN_RETRIES,
+                    DEVICE_OPEN_RETRY_DELAY_SEC,
+                    e,
                 )
                 time.sleep(DEVICE_OPEN_RETRY_DELAY_SEC)
     raise RuntimeError(
@@ -343,48 +428,44 @@ def run_listener(on_play_messages):
     When "play messages" is heard after "flowers", calls on_play_messages() (no arguments).
     """
     global _record_until, _command_buffer
-    if not os.path.isfile(KEYWORD_PATH):
-        raise FileNotFoundError(
-            f"Wake word model not found at {KEYWORD_PATH}. "
-            "Add flowers.ppn to src/voice-models/ (create at https://console.picovoice.ai)."
+    if Decoder is None:
+        raise RuntimeError(
+            "PocketSphinx is required for wake word. Install: pip install PocketSphinx"
         )
-    access_key = os.environ.get("PICOVOICE_KEY")
-    if not access_key:
-        raise ValueError("PICOVOICE_KEY environment variable is required for wake word.")
+    if _get_wake_decoder() is None:
+        raise RuntimeError(
+            "PocketSphinx wake decoder could not be loaded. "
+            f"Check {WAKE_KEYPHRASES_FILE} or install model files."
+        )
+    if _get_command_decoder() is None:
+        raise RuntimeError(
+            "PocketSphinx command decoder could not be loaded. "
+            f"Check {COMMAND_KEYPHRASES_FILE}."
+        )
 
-    # Sensitivity 0.0–1.0; higher = more detections, more false positives. Default 0.5 is often too strict.
-    porcupine = pvporcupine.create(
-        access_key=access_key,
-        keyword_paths=[KEYWORD_PATH],
-        sensitivities=[0.7],
-    )
-    porcupine_rate = porcupine.sample_rate
-    frame_len = porcupine.frame_length
-
-    # On Linux use ALSA (pyalsaaudio) only—PyAudio/PortAudio is unreliable with USB mics there
     if sys.platform == "linux":
         if alsaaudio is None:
             raise RuntimeError(
                 "On Linux, install pyalsaaudio for microphone support: pip install pyalsaaudio"
             )
-        card = os.environ.get("AUDIO_INPUT_CARD", "").strip() or _pick_alsa_capture_card(frame_len)
+        card = os.environ.get("AUDIO_INPUT_CARD", "").strip() or _pick_alsa_capture_card(
+            CHUNK_SAMPLES_16K
+        )
         if card is None:
             raise RuntimeError(
                 "No ALSA capture device found. Run 'arecord -l' to see cards; "
                 "if your USB mic is listed, ensure pyalsaaudio is installed and try again."
             )
-        try:
-            _run_listener_alsa(porcupine, frame_len, on_play_messages, card)
-        finally:
-            porcupine.delete()
+        _run_listener_alsa(on_play_messages, card)
         return
 
     import pyaudio as _pyaudio
     device_index, device_rate = _pick_input_rate()
-    chunk_size = max(1, int(frame_len * device_rate / porcupine_rate))
+    chunk_size = 1024
 
     pa = _pyaudio.PyAudio()
     stream = None
+    _reset_wake_stream()
     try:
         stream = _open_stream_with_retry(pa, device_index, device_rate, chunk_size)
         while True:
@@ -395,23 +476,33 @@ def run_listener(on_play_messages):
                 break
             pcm = array.array("h")
             pcm.frombytes(raw)
-            pcm_16k = _resample_to_16k(pcm, frame_len)
-            if porcupine.process(pcm_16k.tolist()) >= 0:
+            pcm_16k = _pcm_resample_to_16k(pcm, device_rate)
+
+            now = time.time()
+            recording_cmd = _record_until > 0 and now < _record_until
+            if not recording_cmd and _feed_wake_and_detect(pcm_16k.tobytes()):
+                sec = _command_record_sec()
+                logger.info(
+                    "Wake word 'flowers' detected — listening for command (%.1fs)",
+                    sec,
+                )
                 with _lock:
-                    _record_until = time.time() + _command_record_sec()
+                    _record_until = time.time() + sec
 
             with _lock:
-                if _record_until > 0 and time.time() < _record_until:
+                now = time.time()
+                if _record_until > 0 and now < _record_until:
                     if len(_command_buffer) < COMMAND_BUFFER_MAX_CHUNKS:
                         _command_buffer.append(array.array("h", pcm))
                     continue
-                if _record_until > 0 and time.time() >= _record_until and _command_buffer:
+                if _record_until > 0 and now >= _record_until and _command_buffer:
                     chunks = list(_command_buffer)
                     _command_buffer.clear()
                     _record_until = 0.0
                 else:
-                    if _record_until > 0 and time.time() >= _record_until:
+                    if _record_until > 0 and now >= _record_until:
                         _record_until = 0.0
+                        _reset_wake_stream()
                     continue
 
             raw_arr = array.array("h")
@@ -419,6 +510,7 @@ def run_listener(on_play_messages):
                 raw_arr.extend(c)
             n_out = int(len(raw_arr) * 16000 / device_rate)
             audio_16k = _resample_to_16k(raw_arr, n_out)
+            _reset_wake_stream()
             threading.Thread(
                 target=_process_command_audio,
                 args=(audio_16k, on_play_messages),
@@ -440,5 +532,3 @@ def run_listener(on_play_messages):
             pa.terminate()
         except Exception:
             pass
-        porcupine.delete()
-

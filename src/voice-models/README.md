@@ -1,5 +1,11 @@
 # Voice models
 
-- **flowers.ppn** — Picovoice Porcupine wake word (“flowers”). Required. Create at [Picovoice Console](https://console.picovoice.ai/).
+## Wake word (“flowers”)
 
-Command phrase recognition (“play messages”): **PocketSphinx** in keyphrase mode (on-device, offline, low CPU). `command-keyphrases.txt` lists phrases to detect. Install: `pip install PocketSphinx`.
+**PocketSphinx** keyword spotting (on-device, offline). Edit `wake-keyphrases.txt` to tune sensitivity; each line is `phrase /threshold/` (higher threshold = stricter, fewer false triggers). If the file is missing, the code falls back to the single keyphrase `flowers`.
+
+Optional env: `WAKE_COOLDOWN_SEC` (default 1.5) to suppress duplicate wake fires.
+
+## Command phrase (“play messages”)
+
+**PocketSphinx** keyphrase mode. `command-keyphrases.txt` lists phrases (one per line). Install: `pip install PocketSphinx`.
